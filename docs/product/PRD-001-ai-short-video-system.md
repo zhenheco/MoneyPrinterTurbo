@@ -1,7 +1,7 @@
 # PRD-001：Zhenhe AI 短影音經營系統
 
 > 文件狀態：Draft，等待使用者核准
-> 文件版本：0.1
+> 文件版本：0.2
 > 目標 Repo：zhenheco/MoneyPrinterTurbo
 > 上游 Repo：harry0703/MoneyPrinterTurbo
 > 目標租戶：zhenhe
@@ -179,7 +179,42 @@ actual_cost_usd + estimated_next_cost_usd <= budget_limit_usd
 
 V0 只允許建立 Draft。系統不得直接呼叫公開發布流程，不得以既有 Upload-Post 的 auto upload 設定取代人工核准。
 
-## 5. MoneyPrinterTurbo 基線與調整
+## 5. Provider 優先序與授權邊界
+
+MoneyPrinterTurbo 的 Provider Registry 是技術基線，不是本產品的 Provider 政策。產品政策以本 PRD 與 `SPEC-001` 為準；任何上游既有的 `llm_provider` 預設值、API Key 欄位或 WebUI 選項，都不能自動升格為 Zhenhe AI 的產品決策。
+
+### 5.1 兩種執行模式
+
+| 模式 | 可用憑證／入口 | 允許的結果 | 禁止事項 |
+|---|---|---|---|
+| Assisted | Gemini CLI OAuth、Google Flow、Grok Build OAuth、Qwen Code 互動式 Coding／Token Plan | 人員或 Agent 互動後產生 manifest／圖片／影片，再匯入 Job | 把 CLI OAuth 或互動式訂閱憑證交給 MoneyPrinterTurbo backend、排程或 n8n |
+| Automated | Gemini API／Vertex、xAI API、Alibaba ModelStudio API／官方 Token Plan endpoint | 背景 Job 依 Provider contract 呼叫並寫入 ProviderEvent／UsageLedger | 把 Gemini CLI、Grok Build 或 Qwen Code 的 session token 當成通用 API Key |
+
+### 5.2 V0 優先序
+
+優先序分成「人工可用性」與「背景自動化可用性」，不得混為同一條 fallback chain：
+
+1. Assisted POC：Gemini CLI OAuth／Google Flow → Grok Build OAuth → Qwen Code 互動式 Coding／Token Plan → 人工匯入既有素材。
+2. Automated POC：Gemini API／Vertex → xAI API → Alibaba ModelStudio API／官方 Token Plan endpoint → `MANUAL_ACTION_REQUIRED`。
+3. Qwen OAuth 與 Qwen Code session token 不列入新流程依賴；若本機仍有舊快取，只能作為待驗證的人工狀態，不得寫入自動化設定。官方 ModelStudio Token Plan endpoint／credential 另依 Automated contract 驗證。
+4. 每次選擇都必須先通過 `auth_mode`、`execution_mode`、模型能力、成本與權限檢查；不可因某個 CLI 已安裝就宣稱 Provider 可供背景 Job 使用。
+
+截至 2026-08-16 的本機 capability probe：Gemini CLI 0.47.0 存在但現有 OAuth cache 已過期，尚未完成本次登入；Grok Build 1.0.0 已登入，`grok models` 可列出模型且 Assisted 最小 smoke 回傳 `OK`；Qwen Code 0.21.2 存在，但非互動執行沒有選定 auth type，`qwen auth` 已標示為 removed。因此 Gemini 是 `manual_reauth_required`、Grok 是 `assisted_ready`、Qwen OAuth 是 `provider_unavailable`；目前沒有任何一個被驗證為 Automated-ready。詳細證據見 `docs/reports/provider-capability-2026-08-16.md`。
+
+### 5.3 Provider 能力驗收
+
+Provider 只有在以下四項都通過後，才能進入 Automated 候選：
+
+- 憑證來源與服務條款允許該執行模式。
+- 不需讀取、複製或轉送 CLI／訂閱 session token。
+- 最小 `Reply with exactly: OK` smoke request 成功，且錯誤可分類為 retryable／manual／fatal。
+- 模型、成本、request id、external job id 與使用量能寫入追溯資料。
+
+若只通過互動登入而未通過正式 API contract，Provider 的狀態只能是 `ASSISTED_ONLY`，不能被背景 Job 自動 fallback。
+
+Capability status 使用小寫 `ready`、`manual_reauth_required`、`manual_action_required`、`provider_unavailable`；selector decision status 使用 `ASSISTED_READY`、`AUTOMATED_READY`、`ASSISTED_ONLY`、`MANUAL_ACTION_REQUIRED`、`PROVIDER_UNAVAILABLE`。
+
+## 6. MoneyPrinterTurbo 基線與調整
 
 本 fork 重用 MoneyPrinterTurbo 已有的 Python 3.11+、Streamlit WebUI、FastAPI API、CLI、MoviePy、FFmpeg、TTS、字幕、素材與多 Provider 能力。基線可由 fork 的 [README.md](https://github.com/zhenheco/MoneyPrinterTurbo/blob/main/README.md) 與 [pyproject.toml](https://github.com/zhenheco/MoneyPrinterTurbo/blob/main/pyproject.toml) 核對。
 
@@ -191,8 +226,9 @@ V0 只允許建立 Draft。系統不得直接呼叫公開發布流程，不得�
 4. 將 Postiz Draft 設為唯一的 V0 發布出口。
 5. 將成本、Provider、Model、Request ID、External Job ID、Retry 與 Asset Record 納入追溯資料。
 6. 優先重用既有本機 Renderer；不在 V0 先加入 Cloudflare Containers 或大型事件系統。
+7. 在既有 LLM Registry 上增加產品層的 `auth_mode`／`execution_mode` 判斷；不把上游 API Key adapter 改寫成 OAuth token adapter。
 
-## 6. 明確不做
+## 7. 明確不做
 
 - 自動品牌定位與全網趨勢搜尋。
 - 完整多租戶登入、RBAC、Billing 與客戶 BYOK。
@@ -201,10 +237,11 @@ V0 只允許建立 Draft。系統不得直接呼叫公開發布流程，不得�
 - 數位人逐字對嘴。
 - 同一場景多 Provider 競賽。
 - Cloudflare Container 正式部署。
-- 將 Qwen Token Plan 或 Google AI Pro 權益當成後端 API 額度。
+- 將 Qwen Code Token Plan 或 Google AI Pro 權益當成後端 API 額度；官方 ModelStudio Token Plan endpoint 仍須獨立通過 Automated contract。
+- 將 Gemini CLI OAuth、Grok Build OAuth 或 Qwen Code session token 直接接入 MoneyPrinterTurbo backend。
 - 為了需求文件而修改既有功能程式。
 
-## 7. POC 驗收
+## 8. POC 驗收
 
 POC 至少完成 5 支實際影片，並符合：
 
@@ -221,9 +258,10 @@ POC 至少完成 5 支實際影片，並符合：
 - 單支影片人工介入低於 15 分鐘。
 - 不需為每支影片修改程式。
 - 至少一個 Provider 可替換而不改動核心 Job 流程。
+- Assisted 與 Automated Provider 的憑證邊界可由測試明確區分，沒有 silent token fallback。
 - 成片品質足以進入人工審稿，而非完全重做。
 
-## 8. 核准前決策
+## 9. 核准前決策
 
 請核准以下方向後，才進入 SPEC 實作拆解與程式修改：
 
