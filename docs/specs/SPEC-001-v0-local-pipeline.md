@@ -1,9 +1,9 @@
 # SPEC-001：MoneyPrinterTurbo V0 本機 Vertical Slice
 
-> 文件狀態：Draft，等待 PRD-001 核准  
-> 文件版本：0.1  
-> 目標 Repo：zhenheco/MoneyPrinterTurbo  
-> 目標分支：docs/zhenhe-ai-prd-spec  
+> 文件狀態：Draft，等待 PRD-001 核准
+> 文件版本：0.1
+> 目標 Repo：zhenheco/MoneyPrinterTurbo
+> 目標分支：docs/zhenhe-ai-prd-spec
 > 建立日期：2026-08-16
 
 ## 1. 範圍與不變條件

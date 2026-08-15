@@ -1,11 +1,11 @@
 # PRD-001：Zhenhe AI 短影音經營系統
 
-> 文件狀態：Draft，等待使用者核准  
-> 文件版本：0.1  
-> 目標 Repo：zhenheco/MoneyPrinterTurbo  
-> 上游 Repo：harry0703/MoneyPrinterTurbo  
-> 目標租戶：zhenhe  
-> 目標品牌：zhenhe-ai  
+> 文件狀態：Draft，等待使用者核准
+> 文件版本：0.1
+> 目標 Repo：zhenheco/MoneyPrinterTurbo
+> 上游 Repo：harry0703/MoneyPrinterTurbo
+> 目標租戶：zhenhe
+> 目標品牌：zhenhe-ai
 > 建立日期：2026-08-16
 
 ## 0. 文件定位
