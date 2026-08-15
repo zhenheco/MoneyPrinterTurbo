@@ -1,4 +1,4 @@
-# PRD-001：Zhenhe AI AI 短影音經營系統
+# PRD-001：Zhenhe AI 短影音經營系統
 
 > 文件狀態：Draft，等待使用者核准  
 > 文件版本：0.1  
