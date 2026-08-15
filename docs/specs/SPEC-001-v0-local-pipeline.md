@@ -1,9 +1,9 @@
 # SPEC-001：MoneyPrinterTurbo V0 本機 Vertical Slice
 
 > 文件狀態：Draft，等待 PRD-001 核准
-> 文件版本：0.1
+> 文件版本：0.2
 > 目標 Repo：zhenheco/MoneyPrinterTurbo
-> 目標分支：docs/zhenhe-ai-prd-spec
+> 目標分支：main
 > 建立日期：2026-08-16
 
 ## 1. 範圍與不變條件
@@ -18,7 +18,7 @@ V0 執行邊界：
 - 生成式影片使用人工匯入或受控 Provider adapter。
 - 發布只建立 Postiz Draft。
 - 正式 Cloudflare Runtime 留到 V1。
-- Qwen Token Plan 與 Google AI Pro 只能在人工 Assisted／Manual 流程使用，不能被背景 Job 或服務端當 API Key。
+- Qwen Code 的互動式 Coding／Token Plan 權益只能在人工 Assisted／Manual 流程使用，不能被背景 Job 或服務端當 API Key；只有官方 ModelStudio Token Plan endpoint／credential 通過 contract 後，才能列入 Automated 候選。
 
 ## 2. 基線與實作對應
 
@@ -141,7 +141,7 @@ job/
   "visual_prompt": "",
   "reference_assets": [],
   "generation_required": true,
-  "provider": "qwen_assisted",
+  "provider": "qwen_code_plan",
   "provider_model": "",
   "fallback_type": "image_motion",
   "attempt_count": 0,
@@ -168,7 +168,7 @@ job/
   "duration_ms": null,
   "sha256": "",
   "source_mode": "assisted_qwen",
-  "provider": "qwen_assisted",
+  "provider": "qwen_code_plan",
   "model": "",
   "license_or_consent": "",
   "created_at": ""
@@ -302,11 +302,11 @@ class Publisher(Protocol):
 → Job resume
 ~~~
 
-禁止以 Qwen Token Plan Key 執行背景排程、放入 WebUI 後端、放入 n8n 或執行無人值守批次。
+禁止以 Qwen Code 互動式 Token Plan key／session 執行背景排程、放入 WebUI 後端、放入 n8n 或執行無人值守批次。官方 ModelStudio Token Plan endpoint／credential 是另一個 provider contract，不得與 Qwen Code session 混用。
 
 ### 6.2 Manual Google Flow
 
-manual_google_flow 只代表人工生成與匯入，不代表 Gemini API 已啟用。若之後接 API，使用另一個 provider 名稱 gemini_veo_api，並在每次呼叫前執行成本與權限檢查。
+manual_google_flow 只代表人工生成與匯入，不代表 Gemini API 已啟用。若之後接 Gemini API 生成 Veo 素材，`gemini_veo_api` 只是能力別名，audit／selection 一律 canonicalize 為 `gemini_api`，並在每次呼叫前執行成本與權限檢查。
 
 Google AI Pro 權益不得被當成 Gemini API billing 或 API quota。
 
@@ -329,6 +329,50 @@ V0 只規劃 PostizPublisher.create_draft。它應回傳：
 ~~~
 
 任何 publish_now、auto_upload=true 或公開狀態都必須在 V0 被拒絕。
+
+### 6.5 Provider auth mode 與優先序
+
+Provider selection 是產品層 policy，不直接沿用 MoneyPrinterTurbo 的 Registry 順序。每個候選必須宣告：
+
+~~~json
+{
+  "provider": "gemini_cli",
+  "auth_mode": "oauth_cli",
+  "execution_mode": "assisted",
+  "capability_status": "manual_reauth_required",
+  "model": "",
+  "fallback_policy": "no_silent_token_fallback"
+}
+~~~
+
+Canonical provider ID 與 auth mapping：
+
+| canonical provider | auth_mode | execution_mode | 備註 |
+|---|---|---|---|
+| `gemini_cli` | `oauth_cli` | `assisted` | Gemini CLI OAuth；不得進 backend |
+| `manual_google_flow` | `manual_import` | `assisted` | Google Flow 產物匯入 |
+| `grok_build` | `oauth_cli` | `assisted` | Grok Build OAuth；不得進 backend |
+| `qwen_code_plan` | `interactive_subscription` | `assisted` | Qwen Code 互動式 Coding／Token Plan |
+| `gemini_api` | `api_key` | `automated` | `gemini_veo_api` 是能力別名 |
+| `vertex_ai` | `vertex` | `automated` | 正式 Vertex credential |
+| `xai_api` | `api_key` | `automated` | xAI API |
+| `modelstudio_api` | `api_key` | `automated` | Alibaba ModelStudio API |
+| `modelstudio_token_plan` | `modelstudio_token_plan` | `automated` | 官方 endpoint／credential；非 Qwen Code session |
+
+`qwen_assisted` 只允許作讀取舊資料時的 alias，寫入 manifest、ProviderEvent 或 UsageLedger 前必須 canonicalize 為 `qwen_code_plan`。`qwen_oauth` 不屬於可選 provider。
+
+Capability status 固定使用小寫 `ready`、`manual_reauth_required`、`manual_action_required`、`provider_unavailable`；selector 的決策 status 才使用大寫 `ASSISTED_READY`、`AUTOMATED_READY`、`ASSISTED_ONLY`、`MANUAL_ACTION_REQUIRED`、`PROVIDER_UNAVAILABLE`。
+
+固定規則：
+
+1. `oauth_cli`、互動式訂閱與 Agent session 只能是 `assisted`，其輸出必須經 manifest／Asset Import 進入 Job；因此 `grok_build` 的 OAuth 不能宣告成 automated。
+2. `api_key`、Vertex credential 或正式 ModelStudio Token Plan endpoint 才能成為 `automated` 候選，且仍要經 Budget Guard 與 ProviderEvent 記錄。
+3. Assisted 優先序為 `gemini_cli`／`manual_google_flow` → `grok_build` → `qwen_code_plan` → 人工匯入。
+4. Automated 優先序為 `gemini_api`／`vertex_ai` → `xai_api` → `modelstudio_api`／`modelstudio_token_plan` → `MANUAL_ACTION_REQUIRED`。
+5. `qwen_oauth` 不列入新流程的可用 provider；已存在的舊 cache 不得被當作成功能力證明。
+6. Provider 無法滿足執行模式時，狀態必須是 `ASSISTED_ONLY`、`MANUAL_ACTION_REQUIRED` 或 `PROVIDER_UNAVAILABLE`，不得偷偷把另一個 CLI token 當 API Key。
+
+本機測試結果與日期寫入測試報告，不寫入任何 email、access token、refresh token 或 API Key。
 
 ## 7. Asset Import 驗證
 
@@ -441,6 +485,8 @@ if actual_cost_usd + estimated_cost_usd > budget_limit_usd:
 - Idempotency 防止重複生成與重複 Draft。
 - Asset Validation 拒絕錯誤 MIME、尺寸、時長與 checksum。
 - Provider Error Mapping 區分 retryable／manual／fatal。
+- Provider Auth Policy 拒絕 `oauth_cli` 進入 `automated`，並保留明確的 `ASSISTED_ONLY` 結果。
+- Provider 優先序只在同一 `execution_mode` 內 fallback，不跨 Assisted／Automated 邊界。
 - Subtitle Timing 不超出 Master Voice 與影片長度。
 - Render Manifest schema 有通過與拒絕案例。
 
@@ -481,6 +527,7 @@ fixtures/render-failure
 - 核准 PRD-001。
 - 核准狀態機、Provider 邊界、Postiz Draft-only 與 Budget Guard。
 - 確認品牌資料、字型、Logo、聲音與素材授權。
+- 確認 Assisted／Automated Provider 優先序與 OAuth／Token Plan 邊界。
 
 ### Phase 1：最小資料與 schema
 
