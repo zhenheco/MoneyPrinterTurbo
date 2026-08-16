@@ -196,10 +196,10 @@ MoneyPrinterTurbo 的 Provider Registry 是技術基線，不是本產品的 Pro
 
 1. Assisted POC：Gemini CLI OAuth／Google Flow → Grok Build OAuth → Qwen Code 互動式 Coding／Token Plan → 人工匯入既有素材。
 2. Automated POC：Gemini API／Vertex → xAI API → Alibaba ModelStudio API／官方 Token Plan endpoint → `MANUAL_ACTION_REQUIRED`。
-3. Qwen OAuth 與 Qwen Code session token 不列入新流程依賴；若本機仍有舊快取，只能作為待驗證的人工狀態，不得寫入自動化設定。官方 ModelStudio Token Plan endpoint／credential 另依 Automated contract 驗證。
+3. Qwen OAuth free tier 已於 2026-04-15 停止；Qwen Code session token 不列入新流程依賴，需改用 Coding Plan／其他 provider。若本機仍有舊快取，只能作為待驗證的人工狀態，不得寫入自動化設定。官方 ModelStudio Token Plan endpoint／credential 保留為尚待配置與驗證的 Automated candidate，另依 Automated contract 驗證。
 4. 每次選擇都必須先通過 `auth_mode`、`execution_mode`、模型能力、成本與權限檢查；不可因某個 CLI 已安裝就宣稱 Provider 可供背景 Job 使用。
 
-截至 2026-08-16 的本機 capability probe：Gemini CLI 0.47.0 存在但現有 OAuth cache 已過期，尚未完成本次登入；Grok Build 1.0.0 已登入，`grok models` 可列出模型且 Assisted 最小 smoke 回傳 `OK`；Qwen Code 0.21.2 存在，但非互動執行沒有選定 auth type，`qwen auth` 已標示為 removed。因此 Gemini 是 `manual_reauth_required`、Grok 是 `assisted_ready`、Qwen OAuth 是 `provider_unavailable`；目前沒有任何一個被驗證為 Automated-ready。詳細證據見 `docs/reports/provider-capability-2026-08-16.md`。
+截至 2026-08-16 的本機 capability probe：Gemini CLI 0.47.0 的 OAuth code flow 曾到達授權頁並將 code 送回 CLI，但 CLI 明確回報「This client is no longer supported for Gemini Code Assist for individuals」；因此 Gemini 是 `provider_unavailable`（原因：`client_deprecated`），不是 `assisted_ready`，且 Antigravity 不列入本次已驗證能力。Grok Build 1.0.0 已登入，`grok models` 可列出模型且 Assisted 最小 smoke 回傳 `OK`；Qwen Code 0.21.2 的明確 non-interactive smoke 使用 `--auth-type qwen-oauth` 回報 `Qwen OAuth free tier discontinued on 2026-04-15`，需改用 Coding Plan／其他 provider。Token Plan 仍是尚待配置與驗證的 ModelStudio Automated candidate；目前沒有任何一個被驗證為 Automated-ready。詳細證據見 `docs/reports/provider-capability-2026-08-16.md`。
 
 ### 5.3 Provider 能力驗收
 
