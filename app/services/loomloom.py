@@ -13,7 +13,7 @@ import os
 import socket
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -285,24 +285,17 @@ class LoomLoomConfirmedVideoRequest:
 
 def video_settings_from_mapping(values: Mapping[str, Any]) -> LoomLoomSettings:
     """使用项目内置的视频 SkillBot 创建客户端，并放宽视频任务等待时间。"""
-    settings = LoomLoomSettings.from_mapping(values)
-    return LoomLoomSettings(
-        base_url=settings.base_url,
-        api_token=settings.api_token,
+    return replace(
+        LoomLoomSettings.from_mapping(values),
         # 视频 Listing 接收 scenePrompt/aspectRatio/sceneIndex 并返回 MP4；不能
         # 复用文案 Listing，否则报价阶段就会因输入 schema 不匹配而失败。
         market_listing_id=DEFAULT_VIDEO_MARKET_LISTING_ID,
-        listing_version_id=settings.listing_version_id,
-        result_port_name=settings.result_port_name,
-        request_timeout_seconds=settings.request_timeout_seconds,
-        poll_interval_seconds=settings.poll_interval_seconds,
         run_timeout_seconds=float(
             values.get(
                 "loomloom_video_run_timeout_seconds",
                 DEFAULT_VIDEO_RUN_TIMEOUT_SECONDS,
             )
         ),
-        artifact_allowed_hosts=settings.artifact_allowed_hosts,
     )
 
 

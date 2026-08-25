@@ -89,12 +89,11 @@ def select_provider(
     if execution_mode not in {"assisted", "automated"}:
         raise ValueError(f"unsupported execution mode: {execution_mode}")
 
-    candidates = tuple(candidates)
+    candidates = tuple(_canonical_candidate(candidate) for candidate in candidates)
     priority = ASSISTED_PRIORITY if execution_mode == "assisted" else AUTOMATED_PRIORITY
 
     for provider in priority:
-        for candidate in candidates:
-            canonical_candidate = _canonical_candidate(candidate)
+        for canonical_candidate in candidates:
             if canonical_candidate.provider != provider:
                 continue
             if canonical_candidate.execution_mode != execution_mode:
@@ -141,16 +140,13 @@ def _has_assisted_only_candidate(
     if execution_mode != "automated":
         return False
 
-    for candidate in candidates:
-        canonical_candidate = _canonical_candidate(candidate)
-        if (
-            canonical_candidate.capability_status in READY_STATUSES
-            and canonical_candidate.fallback_policy == "no_silent_token_fallback"
-            and canonical_candidate.provider in ASSISTED_PRIORITY
-            and canonical_candidate.auth_mode in ASSISTED_ONLY_AUTH_MODES
-        ):
-            return True
-    return False
+    return any(
+        candidate.capability_status in READY_STATUSES
+        and candidate.fallback_policy == "no_silent_token_fallback"
+        and candidate.provider in ASSISTED_PRIORITY
+        and candidate.auth_mode in ASSISTED_ONLY_AUTH_MODES
+        for candidate in candidates
+    )
 
 
 def _canonical_candidate(candidate: ProviderCandidate) -> ProviderCandidate:
