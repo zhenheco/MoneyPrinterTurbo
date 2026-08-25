@@ -8,12 +8,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from moviepy import ImageClip
+
 from app.config import config
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.v1 import video as video_controller
 from app.models import const
 from app.models.exception import HttpException
-from app.models.schema import TaskListResponse, TaskQueryResponse
+from app.models.schema import MaterialInfo, TaskListResponse, TaskQueryResponse
+from app.services import video as video_service
 from app.services import state as sm
 from app.utils import utils
 
@@ -350,12 +353,132 @@ class TestVideoControllerFiles(unittest.TestCase):
             headers["Range"] = range_header
         return SimpleNamespace(headers=headers)
 
+    @staticmethod
+    def _valid_video_bytes(output_path):
+        source_path = Path(__file__).resolve().parents[1] / "resources" / "1.png"
+        clip = ImageClip(str(source_path)).with_duration(0.2)
+        try:
+            clip.write_videofile(
+                str(output_path),
+                codec="libx264",
+                fps=5,
+                audio=False,
+                logger=None,
+            )
+        finally:
+            clip.close()
+        return Path(output_path).read_bytes()
+
+    def test_upload_video_material_accepts_valid_small_video(self):
+        """可解码的小型 MP4 应保持既有响应形状并落到素材目录。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir, "source.mp4")
+            video_bytes = self._valid_video_bytes(source_path)
+            upload = SimpleNamespace(
+                filename="avatar.mp4",
+                file=BytesIO(video_bytes),
+            )
+
+            with patch.object(
+                video_controller.utils,
+                "storage_dir",
+                return_value=temp_dir,
+            ):
+                response = video_controller.upload_video_material_file(
+                    self._request(), upload
+                )
+
+            self.assertEqual(response["status"], 200)
+            self.assertEqual(response["data"]["file"], "avatar.mp4")
+            self.assertEqual(Path(temp_dir, "avatar.mp4").read_bytes(), video_bytes)
+
+    def test_upload_video_material_accepts_valid_avatar_image(self):
+        """可解码的人像圖片應可作為後續 image-motion 素材。"""
+        source_path = Path(__file__).resolve().parents[1] / "resources" / "1.png"
+        image_bytes = source_path.read_bytes()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            upload = SimpleNamespace(
+                filename="avatar.png",
+                file=BytesIO(image_bytes),
+            )
+
+            with patch.object(
+                video_controller.utils,
+                "storage_dir",
+                return_value=temp_dir,
+            ):
+                response = video_controller.upload_video_material_file(
+                    self._request(), upload
+                )
+
+            self.assertEqual(response["status"], 200)
+            self.assertEqual(response["data"]["file"], "avatar.png")
+            self.assertEqual(Path(temp_dir, "avatar.png").read_bytes(), image_bytes)
+
+    def test_upload_video_material_rejects_malformed_video_without_final_file(self):
+        """格式合法但内容损坏的 MP4 不得进入最终素材目录。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            upload = SimpleNamespace(
+                filename="avatar.mp4",
+                file=BytesIO(b"not a decodable video"),
+            )
+
+            with patch.object(
+                video_controller.utils,
+                "storage_dir",
+                return_value=temp_dir,
+            ):
+                with self.assertRaises(HttpException) as raised:
+                    video_controller.upload_video_material_file(
+                        self._request(), upload
+                    )
+
+            self.assertEqual(raised.exception.status_code, 400)
+            self.assertFalse(Path(temp_dir, "avatar.mp4").exists())
+            self.assertEqual(list(Path(temp_dir).iterdir()), [])
+
+    def test_uploaded_video_passes_existing_local_preprocess_path(self):
+        """上傳成功的 MP4 應能直接交給既有 local preprocess 流程。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir, "source.mp4")
+            video_bytes = self._valid_video_bytes(source_path)
+            upload = SimpleNamespace(
+                filename="avatar.mp4",
+                file=BytesIO(video_bytes),
+            )
+
+            with patch.object(
+                video_controller.utils,
+                "storage_dir",
+                return_value=temp_dir,
+            ):
+                response = video_controller.upload_video_material_file(
+                    self._request(), upload
+                )
+                materials = video_service.preprocess_video(
+                    [
+                        MaterialInfo(
+                            provider="local",
+                            url=response["data"]["file"],
+                        )
+                    ],
+                    clip_duration=4,
+                )
+
+            self.assertEqual(len(materials), 1)
+            self.assertEqual(
+                materials[0].url,
+                os.path.realpath(Path(temp_dir, "avatar.mp4")),
+            )
+
     def test_upload_video_material_validates_complete_extension(self):
         """大写合法扩展名应接受，无点号伪扩展名应拒绝。"""
         with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir, "source.mp4")
+            video_bytes = self._valid_video_bytes(source_path)
             upload = SimpleNamespace(
                 filename=r"C:\videos\clip.MOV",
-                file=BytesIO(b"video"),
+                file=BytesIO(video_bytes),
             )
             with patch.object(
                 video_controller.utils,
@@ -367,7 +490,7 @@ class TestVideoControllerFiles(unittest.TestCase):
                 )
 
             self.assertEqual(response["data"]["file"], "clip.MOV")
-            self.assertEqual(Path(temp_dir, "clip.MOV").read_bytes(), b"video")
+            self.assertEqual(Path(temp_dir, "clip.MOV").read_bytes(), video_bytes)
 
             invalid_upload = SimpleNamespace(
                 filename="photojpg",

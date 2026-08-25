@@ -306,6 +306,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "grok",
                 "minimax",
                 "mimo",
+                "shengsuanyun",
                 "cloudflare",
                 "modelscope",
                 "aihubmix",

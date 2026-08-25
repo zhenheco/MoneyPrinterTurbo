@@ -26,7 +26,8 @@ V0 執行邊界：
 |---|---|---|
 | 腳本與模型 | 既有 AI Agent／API／WebUI 與多 Provider | 輸出固定 Script JSON，不接受純文字作唯一結果 |
 | Scene／素材 | 既有影片與本地／外部素材流程 | 增加 scene_id、manifest、Asset Record 與匯入驗證 |
-| 語音 | 既有 Edge TTS、Azure、Gemini 等選項 | 預設一次產生 Master Voice，Scene 只引用時間區間 |
+| Creator Profile | 新增產品層 profile reference | 只保存明確同意的 voice／avatar asset reference 與 consent metadata |
+| 語音 | 既有 Edge TTS、Azure、Gemini 等選項 | 一般 Scene 預設一次產生 Master Voice；`native_speech_avatar` Scene 必須保留 provider 原生音訊，不得覆蓋 |
 | 字幕 | 既有 edge／whisper 路徑 | 字幕由後製層產生，不把文字交給生成影像或影片模型 |
 | 渲染 | MoviePy／FFmpeg | 固定 1080×1920、H.264、AAC，輸出前執行 ffprobe |
 | 發布 | 上游已有跨平台上傳能力 | V0 以 Postiz Draft adapter 取代直接公開上傳 |
@@ -57,6 +58,7 @@ V0 執行邊界：
 ~~~text
 job/
 ├── input/request.json
+├── profile/creator-profile.json
 ├── research/research.json
 ├── scripts/script.json
 ├── scenes/{scene_id}/
@@ -86,13 +88,46 @@ job/
 
 ## 4. 核心資料契約
 
-### 4.1 ContentJob
+### 4.1 Creator Profile
+
+Creator Profile 只保存 asset reference 與 consent metadata，不保存 biometric material、secret 或 provider credential。voice／avatar reference 必須分別明確同意，且在使用前通過人工審核：
+
+~~~json
+{
+  "creator_profile_id": "creator-001",
+  "tenant_id": "zhenhe",
+  "brand_id": "zhenhe-ai",
+  "voice": {
+    "asset_ref": "asset-voice-001",
+    "consent_status": "explicit_granted",
+    "usage_scope": "zhenhe-ai V0 short videos",
+    "source": "user_recording",
+    "expires_at": "",
+    "revoked_at": null,
+    "manual_review_status": "approved"
+  },
+  "avatar": {
+    "asset_ref": "asset-avatar-001",
+    "consent_status": "explicit_granted",
+    "usage_scope": "zhenhe-ai V0 short videos",
+    "source": "user_provided_still",
+    "expires_at": "",
+    "revoked_at": null,
+    "manual_review_status": "approved"
+  }
+}
+~~~
+
+voice 的 `asset_ref` 必須指向唯一的 Master Voice asset；avatar 的 `asset_ref` 必須指向 scene asset。expired、revoked、未明確同意或未通過 manual review 的 reference 不得進入 render。
+
+### 4.2 ContentJob
 
 ~~~json
 {
   "content_job_id": "job-20260816-001",
   "tenant_id": "zhenhe",
   "brand_id": "zhenhe-ai",
+  "creator_profile_id": "creator-001",
   "topic": "企業導入AI最常犯的三個錯誤",
   "language": "zh-TW",
   "target_duration_sec": 50,
@@ -109,7 +144,7 @@ job/
 }
 ~~~
 
-### 4.2 Script
+### 4.3 Script
 
 ~~~json
 {
@@ -126,7 +161,7 @@ job/
 }
 ~~~
 
-### 4.3 Scene
+### 4.4 Scene
 
 ~~~json
 {
@@ -151,7 +186,9 @@ job/
 
 允許的 visual_type：avatar、generated_video、generated_image、screen_recording、motion_graphic、title_card。
 
-### 4.4 Asset Record
+V0 的 `avatar` 只代表人工匯入的 user-provided still／image-motion 或預先渲染 talking-head／avatar MP4，不授權直接呼叫 Provider；`generated_video` 仍最多 3 個，匯入 avatar video 不得擴大此限制。
+
+### 4.5 Asset Record
 
 ~~~json
 {
@@ -171,11 +208,17 @@ job/
   "provider": "qwen_code_plan",
   "model": "",
   "license_or_consent": "",
+  "consent_status": "not_applicable",
+  "usage_scope": "",
+  "consent_source": "",
+  "consent_expires_at": "",
+  "consent_revoked_at": null,
+  "manual_review_status": "pending",
   "created_at": ""
 }
 ~~~
 
-### 4.5 Provider Event 與 Usage Ledger
+### 4.6 Provider Event 與 Usage Ledger
 
 ~~~json
 {
@@ -310,9 +353,13 @@ manual_google_flow 只代表人工生成與匯入，不代表 Gemini API 已啟�
 
 Google AI Pro 權益不得被當成 Gemini API billing 或 API quota。
 
-### 6.3 Voice
+### 6.3 Voice and Creator Profile
 
-V0 可使用 Edge TTS、既有錄音或另一個已核准 TTS Provider，但 Job 只建立一個 Master Voice 輸出。Scene 只儲存旁白時間區間與字幕引用，不各自生成主旁白。
+V0 voice path 可使用 `improved TTS`、使用者提供的錄音，或由 Provider 產生後人工匯入的 voice output；Job 只建立一個 Master Voice asset。Voice reference 必須來自明確同意的 Creator Profile。不得默默 clone、模仿或揭露任何人的可識別身分；直接 automated voice-cloning provider call deferred／manual-only。
+
+Scene 只儲存旁白時間區間與字幕引用，不各自生成主旁白。
+
+若 Scene 的 `visual_type` 是 talking-head／avatar 且素材本身含 provider 生成的對白與嘴型同步，必須將 Render Manifest 的 `audio.mode` 設為 `native_speech_avatar`，並將該素材的原生音訊視為 authoritative voice。Renderer 不得用另一條 TTS／錄音覆蓋它；缺少原生音訊、voice selection 不符或影音 QA 未通過時，Scene 必須退回人工處理或 visual-only fallback。
 
 ### 6.4 Publisher
 
@@ -374,6 +421,31 @@ Capability status 固定使用小寫 `ready`、`manual_reauth_required`、`manua
 
 本機測試結果與日期寫入測試報告，不寫入任何 email、access token、refresh token 或 API Key。
 
+### 6.5A LoomLoom B-roll Provider adapter
+
+LoomLoom 是可選的影片素材 provider，不是 Creator Profile、voice cloning 或
+avatar/lip-sync provider。其契約如下：
+
+1. `video_source=loomloom` 必須明確啟用；沒有 `LoomLoomConfirmedVideoRequest` 時，後端不得發出 quote 以外的付費 execute。
+2. WebUI 依目前 subject／video terms 建立 1～5 row batch；產品 V0 以最多 3 個 generated-video Scene 限制提交數量。quote 回傳的 `listingVersionId`、估算金額與 batch 必須在 execute 前保持一致。
+3. execute 必須帶 `confirm=true` 與穩定 `clientRequestId`。遇到可重試 HTTP／網路錯誤時，最多有限重試且只能重用相同 request ID，不能產生新的付費請求。
+4. execute 前必須先把 quote、stable request ID、budget 與 `execute_pending` 寫入 task state；付費 run 建立後再記錄安全的 `external_job_id`。任一持久化不明確時不得自動重送，必須標記 `manual_recovery_required`；secret 不能寫入 task state、`VideoParams`、history 或 log。
+5. 每一 row 只接受 allowlisted host 的 HTTPS `video/mp4` artifact；禁止 private／loopback host，redirect 必須逐跳重新驗證，下載使用 timeout、512 MB 上限、`.part` 暫存與 atomic rename，且 signed artifact URL 不附帶 LoomLoom Bearer key。
+6. quote 的 `estimated_buyer_payable_t` 必須不超過目前 job 的 `budget_limit_t`，並保存 estimated／actual-unknown cost 狀態；超出預算時不得呼叫付費 execute。
+7. 下載完成的 clips 直接交給既有 narration／subtitle／BGM／MoviePy 合成；素材本身不得帶入 authoritative voice，也不會解除 `native_speech_avatar` 的人工 consent／QA 邊界。
+
+本 adapter 的測試只使用 fake HTTP session；帳號申請、充值、真實 quote、遠端生成與服務商 SLA 必須另以 live provider evidence 驗證，不能由單元測試推定。
+
+### 6.6 Video/Avatar Provider gate
+
+V0 的 creator avatar 只走人工 Asset Import：user-provided still／image-motion 或預先渲染 talking-head／avatar MP4。Automated voice／avatar cloning 與 lip-sync provider call deferred／manual-only；要開放直接 provider automation，正式 Video/Avatar Provider contract 必須先通過，並記錄：
+
+- credential mode、`auth_mode`、`execution_mode` 與憑證來源。
+- `request_id`、`external_job_id` 與 idempotency。
+- estimated／actual cost。
+- deletion／retention policy。
+- technical、consent 與 content QA。
+
 ## 7. Asset Import 驗證
 
 匯入每個 Scene 素材時必須：
@@ -388,6 +460,9 @@ Capability status 固定使用小寫 `ready`、`manual_reauth_required`、`manua
 8. 不允許外部 URL 直接成為 Shell command。
 9. 對遠端下載採 allowlist、timeout 與大小上限。
 10. 對 Ace 人像與聲音素材記錄來源與使用授權。
+11. Creator Profile voice／avatar reference 必須有 explicit consent、usage scope、source、expiry／revocation 與 manual review 記錄。
+12. biometric material、secret、credential 與原始敏感內容不得寫入 log、audit 摘要或 prompt。
+13. `creator_profile_file` 必須先通過 metadata preflight，且只保存 opaque asset reference，不得保存原始媒體或檔案路徑。
 
 ## 8. Render Manifest
 
@@ -403,6 +478,7 @@ Render Manifest 必須是可重現資料，不依賴目前 WebUI 的暫存狀態
     "pixel_format": "yuv420p"
   },
   "audio": {
+    "mode": "master_voice",
     "master_voice_asset_id": "asset-voice-001",
     "sample_rate": 48000,
     "codec": "aac"
@@ -470,11 +546,21 @@ if actual_cost_usd + estimated_cost_usd > budget_limit_usd:
 - 檔案類型、大小、尺寸與時長必須在渲染前驗證。
 - 外部 URL 下載必須限制來源、timeout、redirect 與大小。
 - Postiz 預設拒絕公開發布。
-- 人像、聲音、Logo 與品牌素材要有來源／授權紀錄。
+- 人像、聲音、Logo 與品牌素材要有來源／授權紀錄；Creator Profile 另保留 consent、usage scope、expiry／revocation 與 manual review。
+- biometric material、secret 與 credential 不進 Log 或 Prompt。
 - 產物要保留 Provider、Model 與時間戳。
 - 以 tenant_id、brand_id、content_job_id 做隔離，即使 V0 沒有複雜 RBAC。
 
 ## 12. 測試契約
+
+### Acceptance criteria
+
+- Creator Profile 必須同時提供明確同意的 voice／avatar reference；缺少 consent、usage scope、source、expiry／revocation 或 manual review，或已 expired／revoked，必須拒絕進入 render。
+- Voice 只接受 `improved TTS`、使用者錄音，或人工匯入的 provider-generated output；最終只能有一個 Master Voice，且不得 silent clone 或 expose identity。
+- Avatar 只接受人工匯入的 still／image-motion 或預先渲染 talking-head／avatar MP4；未通過正式 Video/Avatar Provider contract 前，直接 provider automation、cloning 與 lip-sync call 必須被拒絕或轉為 manual-only。
+- `native_speech_avatar` 必須保留同一 provider 素材的原生音訊，不得用另一條 TTS／錄音覆蓋；voice selection 與角色需通過人工影音 QA，否則不得通過 render。
+- V0 仍固定 8～10 個 Scene、最多 3 個 `generated_video` Scene、1080×1920 H.264/AAC、post-render captions 與 Postiz Draft-only publishing。
+- log、audit 摘要與 prompt 不得包含 biometric material、secret 或 credential。
 
 ### Unit
 
@@ -484,10 +570,14 @@ if actual_cost_usd + estimated_cost_usd > budget_limit_usd:
 - State Transition 拒絕非法跳轉。
 - Idempotency 防止重複生成與重複 Draft。
 - Asset Validation 拒絕錯誤 MIME、尺寸、時長與 checksum。
+- Creator Profile 驗證 explicit consent、expiry／revocation 與 manual review。
+- Creator Profile Preflight 在 LLM／TTS／素材處理前拒絕缺 consent、過期、撤回、未審核或含敏感 payload 的 profile。
 - Provider Error Mapping 區分 retryable／manual／fatal。
 - Provider Auth Policy 拒絕 `oauth_cli` 進入 `automated`，並保留明確的 `ASSISTED_ONLY` 結果。
+- Video/Avatar Provider 未通過 contract 時拒絕 direct automation、voice/avatar cloning 與 lip-sync call。
 - Provider 優先序只在同一 `execution_mode` 內 fallback，不跨 Assisted／Automated 邊界。
 - Subtitle Timing 不超出 Master Voice 與影片長度。
+- Native Speech Sync 驗證 `native_speech_avatar` 的 video／audio 來自同一 provider asset，且 render 沒有覆蓋音軌。
 - Render Manifest schema 有通過與拒絕案例。
 
 ### Contract
@@ -527,7 +617,9 @@ fixtures/render-failure
 - 核准 PRD-001。
 - 核准狀態機、Provider 邊界、Postiz Draft-only 與 Budget Guard。
 - 確認品牌資料、字型、Logo、聲音與素材授權。
+- 確認 Creator Profile 的 voice／avatar reference、consent scope、expiry／revocation 與 manual review owner。
 - 確認 Assisted／Automated Provider 優先序與 OAuth／Token Plan 邊界。
+- 確認 Video/Avatar Provider contract gate；未通過前只允許人工匯入。
 
 ### Phase 1：最小資料與 schema
 
@@ -542,7 +634,7 @@ topic
 → script JSON
 → 8～10 Scene JSON
 → generation manifest
-→ 人工匯入 3 個圖片／最多 3 個影片
+→ 人工匯入 creator voice／avatar asset、3 個圖片／最多 3 個影片
 → Master Voice
 → render
 → ffprobe QA
@@ -562,7 +654,9 @@ V0 不把 Cloudflare 當作必要條件。若 V0 通過，V1 才評估 Workers�
 - Postiz Cloud 或 Self-hosted。
 - 第一個發布平台。
 - Brand Guideline、Logo、字型與色彩。
-- Ace Character Pack 與聲音素材是否已具備。
+- 首批 Creator Profile 的 voice／avatar reference、consent owner、usage scope、source、expiry／revocation 與 manual review owner。
+- 是否在首批 POC 使用 provider-generated voice output；若使用，僅能人工匯入為 Master Voice。
+- Video/Avatar Provider contract 的 owner、deletion／retention policy 與 QA sign-off。
 - 每月產量與長期成本上限。
 - Gemini API billing 是否另有正式專案。
 - Qwen assisted 素材匯入的人工工作台與目錄。

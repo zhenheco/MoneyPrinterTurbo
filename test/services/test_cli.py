@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -181,6 +181,50 @@ class TestCli(unittest.TestCase):
         params = cli.build_video_params(args)
 
         self.assertEqual(params.custom_audio_file, "voiceover.mp3")
+
+    def test_native_speech_avatar_mode_maps_to_video_params(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "test",
+                "--audio-mode",
+                "native_speech_avatar",
+                "--custom-audio-file",
+                "provider-native.m4a",
+            ]
+        )
+        params = cli.build_video_params(args)
+
+        self.assertEqual(params.audio_mode, "native_speech_avatar")
+        self.assertEqual(params.custom_audio_file, "provider-native.m4a")
+
+    def test_native_speech_avatar_mode_requires_custom_audio_file(self):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                cli.parse_args(
+                    [
+                        "--video-subject",
+                        "test",
+                        "--audio-mode",
+                        "native_speech_avatar",
+                    ]
+                )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("requires --custom-audio-file", stderr.getvalue())
+
+    def test_creator_profile_file_maps_to_video_params(self):
+        args = cli.parse_args(
+            [
+                "--video-subject",
+                "test",
+                "--creator-profile",
+                "creator-profile.json",
+            ]
+        )
+        params = cli.build_video_params(args)
+
+        self.assertEqual(params.creator_profile_file, "creator-profile.json")
 
     def test_build_video_params_with_subtitle_style_options(self):
         args = cli.parse_args(

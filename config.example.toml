@@ -21,6 +21,19 @@ listen_port = 8080
 # 是否隐藏 WebUI 基础配置面板。
 hide_config = false
 
+# Optional LoomLoom script/video material integration. Keep the feature disabled
+# until a user explicitly selects the source and confirms each quoted run.
+script_generation_backend = "local"
+loomloom_base_url = "https://loomloom.shengsuanyun.com/loom/v1"
+loomloom_api_token = ""
+# Optional artifact host allowlist. Leave empty to allow only the API host above;
+# add the provider's HTTPS signed-download host when it is different.
+loomloom_artifact_allowed_hosts = []
+loomloom_request_timeout_seconds = 30
+loomloom_poll_interval_seconds = 2
+loomloom_run_timeout_seconds = 600
+loomloom_video_run_timeout_seconds = 1800
+
 # Timeout in seconds for a single Edge TTS streaming request.
 # 单次 Edge TTS 流式请求超时时间。慢网络可适当调大，设置为 0 表示禁用超时。
 edge_tts_timeout = 30
@@ -33,7 +46,7 @@ tls_verify = true
 # Video Materials / 视频素材
 # -----------------------------------------------------------------------------
 
-# Available values: "pexels", "pixabay", "coverr", "local".
+# Available values: "pexels", "pixabay", "coverr", "loomloom", "local".
 video_source = "pexels"
 
 # API key lists support key rotation. Use straight ASCII double quotes and
@@ -86,6 +99,12 @@ llm_provider = "moonshot"
 moonshot_api_key = ""
 moonshot_base_url = ""
 moonshot_model_name = ""
+
+# Shengsuan Cloud, OpenAI-compatible multi-model API.
+# API docs: https://lean.shengsuanyun.com/apidocs/api/openai-api
+shengsuanyun_api_key = ""
+shengsuanyun_base_url = ""
+shengsuanyun_model_name = ""
 
 # OpenAI or another OpenAI Chat Completions-compatible provider.
 # API key: https://platform.openai.com/api-keys

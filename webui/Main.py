@@ -42,7 +42,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
-from app.services import cache_manager, llm, video, voice, webui_task
+from app.services import cache_manager, llm, loomloom, video, voice, webui_task
 from app.services import elevenlabs_music as elevenlabs_music_service
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
@@ -92,6 +92,7 @@ VOICE_MODE_NONE = "none"
 # 后端在 video_codec 未配置时继续采用稳定的 libx264；单独保留该哨兵可以区分
 # “跟随项目默认策略”和“用户明确固定 libx264”，便于未来安全调整默认策略。
 DEFAULT_VIDEO_CODEC_OPTION = "__default__"
+MAX_PRODUCT_LOOMLOOM_VIDEO_SCENES = 3
 DEFAULT_SUBTITLE_SETTINGS = {
     "subtitle_enabled": True,
     "font_name": "MicrosoftYaHeiBold.ttc",
@@ -329,6 +330,20 @@ def _initialize_session_state():
         # 最近一次从当前页面提交的任务。生成改为后台执行后，页面 Fragment
         # 通过这个 ID 查询状态；刷新时不再依赖正在执行的旧页面脚本。
         "current_generation_task_id": "",
+        "loomloom_video_batch": None,
+        "loomloom_video_quote": None,
+        "loomloom_video_input_signature": "",
+        "loomloom_video_client_request_id": "",
+        "loomloom_video_confirm_charge": False,
+        "loomloom_budget_limit_t": int(
+            max(int(config.ui.get("loomloom_budget_limit_t", 0) or 0), 0)
+        ),
+        "loomloom_video_scene_count": int(
+            min(
+                max(int(config.ui.get("loomloom_video_scene_count", 1) or 1), 1),
+                MAX_PRODUCT_LOOMLOOM_VIDEO_SCENES,
+            )
+        ),
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -2376,6 +2391,173 @@ def _render_script_settings(panel, params):
             )
 
 
+def _create_loomloom_video_backend():
+    """Create a LoomLoom video-material client from the effective app config."""
+    app_config_snapshot = config.snapshot_config_with_pending(config.app)
+    effective_token = _effective_loomloom_api_token()
+    if str(app_config_snapshot.get("llm_provider", "") or "").lower() != "shengsuanyun":
+        # The WebUI token is session-scoped. Inject it into this in-process mapping
+        # only; never write the raw value back to config.toml.
+        app_config_snapshot["loomloom_api_token"] = effective_token
+    settings = loomloom.video_settings_from_mapping(app_config_snapshot)
+    return loomloom.LoomLoomVideoBackend(settings)
+
+
+def _effective_loomloom_api_token():
+    """Resolve the explicit Shengsuan Cloud key without environment fallback."""
+    app_config_snapshot = config.snapshot_config_with_pending(config.app)
+    if str(app_config_snapshot.get("llm_provider", "") or "").lower() == "shengsuanyun":
+        return loomloom.resolve_api_token(app_config_snapshot)
+    if "loomloom_user_api_token" in st.session_state:
+        return str(st.session_state.get("loomloom_user_api_token") or "").strip()
+    return str(app_config_snapshot.get("loomloom_api_token", "") or "").strip()
+
+
+def _render_loomloom_api_token_input():
+    """Reuse the selected Shengsuan key or collect a separate LoomLoom key."""
+    app_config_snapshot = config.snapshot_config_with_pending(config.app)
+    if str(app_config_snapshot.get("llm_provider", "") or "").lower() == "shengsuanyun":
+        st.caption("勝算云 LLM 的 API Key 會在此處明確重用，不會另存第二份。")
+        return loomloom.resolve_api_token(app_config_snapshot)
+
+    configured_token = loomloom.resolve_api_token(app_config_snapshot)
+    st.session_state.setdefault("loomloom_user_api_token", configured_token)
+    st.text_input(
+        "Shengsuan Cloud API Key",
+        type="password",
+        key="loomloom_user_api_token",
+        help="請在勝算云控制台建立 API Key；此 key 只用於 LoomLoom。",
+        placeholder="輸入 API Key",
+    )
+    return _effective_loomloom_api_token()
+
+
+def _loomloom_video_scene_prompts(video_terms, subject, scene_count):
+    """Turn current keywords into a bounded list of silent B-roll scene prompts."""
+    if isinstance(video_terms, str):
+        terms = [
+            term.strip() for term in re.split(r"[,，\n]", video_terms) if term.strip()
+        ]
+    elif isinstance(video_terms, list):
+        terms = [str(term or "").strip() for term in video_terms if str(term or "").strip()]
+    else:
+        terms = []
+    fallback = str(subject or "").strip()
+    if not terms and fallback:
+        terms = [fallback]
+    return tuple(terms[index % len(terms)] for index in range(int(scene_count))) if terms else ()
+
+
+def _loomloom_video_signature(batch, credential_fingerprint):
+    """Invalidate a quote when any billable input or account binding changes."""
+    payload = {
+        "inputRows": [dict(row) for row in batch.input_rows],
+        "credentialFingerprint": str(credential_fingerprint or "").strip(),
+    }
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _current_loomloom_video_quote_context(params):
+    token = _effective_loomloom_api_token()
+    scene_count = min(
+        max(int(st.session_state.get("loomloom_video_scene_count", 1) or 1), 1),
+        MAX_PRODUCT_LOOMLOOM_VIDEO_SCENES,
+    )
+    prompts = _loomloom_video_scene_prompts(
+        params.video_terms,
+        params.video_subject or params.video_script,
+        scene_count,
+    )
+    if not token or not prompts:
+        return None, ""
+    try:
+        batch = _create_loomloom_video_backend().prepare_video_batch(
+            subject=params.video_subject or params.video_script,
+            scene_prompts=prompts,
+            aspect_ratio=(
+                params.video_aspect.value
+                if isinstance(params.video_aspect, VideoAspect)
+                else params.video_aspect
+            ),
+        )
+    except (loomloom.LoomLoomError, ValueError):
+        return None, ""
+    fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return batch, _loomloom_video_signature(batch, fingerprint)
+
+
+def _render_loomloom_video_settings(params):
+    """Render quote and explicit charge confirmation for paid AI B-roll."""
+    st.caption(
+        "LoomLoom 只生成無旁白的影片素材，完成後仍使用既有旁白、字幕與合成流程。"
+    )
+    token = _render_loomloom_api_token_input()
+    scene_count = st.number_input(
+        "AI Video Scene Count",
+        min_value=1,
+        max_value=MAX_PRODUCT_LOOMLOOM_VIDEO_SCENES,
+        step=1,
+        key="loomloom_video_scene_count",
+    )
+    config.update_config_nonblocking(config.ui, "loomloom_video_scene_count", int(scene_count))
+    budget_limit_t = st.number_input(
+        "LoomLoom 最高預算（T，Provider 原生單位）",
+        min_value=0,
+        step=1000,
+        key="loomloom_budget_limit_t",
+        help="報價超過此上限時，系統不會送出付費生成請求。",
+    )
+    config.update_config_nonblocking(config.ui, "loomloom_budget_limit_t", int(budget_limit_t))
+    batch, input_signature = _current_loomloom_video_quote_context(params)
+    if not token:
+        st.warning("請先輸入 Shengsuan Cloud API Key。")
+    if budget_limit_t <= 0:
+        st.warning("請先設定大於 0 的 LoomLoom 預算上限。")
+
+    if st.button(
+        "取得 LoomLoom 報價",
+        key="loomloom_quote_videos",
+        use_container_width=True,
+        type="secondary",
+        disabled=not token or batch is None or budget_limit_t <= 0,
+    ):
+        try:
+            quote_result = _create_loomloom_video_backend().quote(batch)
+        except (loomloom.LoomLoomError, ValueError) as exc:
+            logger.warning(f"failed to quote LoomLoom videos: error={exc}")
+            st.error(str(exc))
+        else:
+            st.session_state["loomloom_video_batch"] = batch
+            st.session_state["loomloom_video_quote"] = quote_result
+            st.session_state["loomloom_video_input_signature"] = input_signature
+            st.session_state["loomloom_video_client_request_id"] = f"mpt-video-{uuid4()}"
+            st.session_state["loomloom_video_confirm_charge"] = False
+
+    quote_result = st.session_state.get("loomloom_video_quote")
+    quoted_batch = st.session_state.get("loomloom_video_batch")
+    if quote_result is not None and quoted_batch is not None:
+        display_amount = quote_result.estimated_buyer_payable_amount or f"{quote_result.estimated_buyer_payable_t} T"
+        st.success(
+            f"{quote_result.task_count} 段 AI 影片素材；預估費用：{display_amount} {quote_result.currency}"
+        )
+        quote_is_current = (
+            st.session_state.get("loomloom_video_input_signature") == input_signature
+        )
+        quote_over_budget = quote_result.estimated_buyer_payable_t > int(budget_limit_t)
+        if quote_over_budget:
+            st.error("目前報價超過預算上限；請調整場景數或重新設定預算。")
+        if not quote_is_current:
+            st.warning("主題、關鍵字或帳號已變更，請重新取得報價。")
+        st.checkbox(
+            "我了解這是付費 AI 影片生成，並確認使用目前報價。",
+            key="loomloom_video_confirm_charge",
+            disabled=not quote_is_current or quote_over_budget,
+        )
+
+
 def _render_video_settings(panel, params):
     """渲染视频设置并返回本次选择的本地素材。"""
     uploaded_files = []
@@ -2390,6 +2572,7 @@ def _render_video_settings(panel, params):
                 (tr("Pexels"), "pexels"),
                 (tr("Pixabay"), "pixabay"),
                 (tr("Coverr"), "coverr"),
+                ("Shengsuan Cloud AI Video", "loomloom"),
                 (tr("Local file"), "local"),
             ]
 
@@ -2554,6 +2737,9 @@ def _render_video_settings(panel, params):
                 _delete_runtime_config("app", "video_codec")
             else:
                 _set_runtime_config("app", "video_codec", selected_video_codec)
+
+            if params.video_source == "loomloom":
+                _render_loomloom_video_settings(params)
     return uploaded_files
 
 
@@ -4089,7 +4275,13 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        if params.video_source not in ["pexels", "pixabay", "coverr", "local"]:
+        if params.video_source not in [
+            "pexels",
+            "pixabay",
+            "coverr",
+            "loomloom",
+            "local",
+        ]:
             _remove_active_generation_task(task_id)
             st.error(tr("Please Select a Valid Video Source"))
             st.stop()
@@ -4114,6 +4306,53 @@ def _render_generation_controls(
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Coverr API Key"))
             st.stop()
+
+        loomloom_video_request = None
+        if params.video_source == "loomloom":
+            current_batch, current_signature = _current_loomloom_video_quote_context(
+                params
+            )
+            quoted_batch = st.session_state.get("loomloom_video_batch")
+            quote_result = st.session_state.get("loomloom_video_quote")
+            quote_is_current = bool(
+                current_batch is not None
+                and isinstance(quoted_batch, loomloom.LoomLoomVideoBatch)
+                and quote_result is not None
+                and st.session_state.get("loomloom_video_input_signature")
+                == current_signature
+            )
+            budget_limit_t = int(
+                st.session_state.get("loomloom_budget_limit_t", 0) or 0
+            )
+            if not quote_is_current:
+                _remove_active_generation_task(task_id)
+                st.error("請先取得目前主題與關鍵字的 AI 影片報價。")
+                st.stop()
+            if budget_limit_t <= 0:
+                _remove_active_generation_task(task_id)
+                st.error("請先設定大於 0 的 LoomLoom 預算上限。")
+                st.stop()
+            if not st.session_state.get("loomloom_video_confirm_charge", False):
+                _remove_active_generation_task(task_id)
+                st.error("請先確認 AI 影片生成費用。")
+                st.stop()
+            try:
+                video_backend = _create_loomloom_video_backend()
+                loomloom_video_request = loomloom.LoomLoomConfirmedVideoRequest(
+                    settings=video_backend.settings,
+                    batch=current_batch,
+                    listing_version_id=quote_result.listing_version_id,
+                    client_request_id=st.session_state[
+                        "loomloom_video_client_request_id"
+                    ],
+                    quote=quote_result,
+                    budget_limit_t=budget_limit_t,
+                )
+                loomloom_video_request.validate()
+            except (loomloom.LoomLoomError, ValueError) as exc:
+                _remove_active_generation_task(task_id)
+                st.error(str(exc))
+                st.stop()
 
         if (
             params.bgm_type == "sonilo"
@@ -4270,7 +4509,13 @@ def _render_generation_controls(
                 params=params,
                 capture_logs=not config.ui.get("hide_log", False),
                 voice_preview=reusable_voice_preview,
+                loomloom_video_request=loomloom_video_request,
             )
+            if loomloom_video_request is not None:
+                st.session_state["loomloom_video_batch"] = None
+                st.session_state["loomloom_video_quote"] = None
+                st.session_state["loomloom_video_input_signature"] = ""
+                st.session_state["loomloom_video_client_request_id"] = ""
         except Exception:
             _remove_active_generation_task(task_id)
             st.error(tr("Video Generation Failed"))

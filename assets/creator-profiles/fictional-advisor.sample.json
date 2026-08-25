@@ -1,0 +1,23 @@
+{
+  "creator_profile_id": "fictional-advisor-sample",
+  "tenant_id": "zhenhe",
+  "brand_id": "zhenhe-ai",
+  "voice": {
+    "asset_ref": "sample-google-flow-charon-native-voice",
+    "consent_status": "explicit_granted",
+    "usage_scope": "local POC synthetic sample only",
+    "source": "synthetic_provider_sample",
+    "expires_at": "",
+    "revoked_at": null,
+    "manual_review_status": "approved"
+  },
+  "avatar": {
+    "asset_ref": "sample-google-flow-fictional-advisor",
+    "consent_status": "explicit_granted",
+    "usage_scope": "local POC synthetic sample only",
+    "source": "synthetic_provider_sample",
+    "expires_at": "",
+    "revoked_at": null,
+    "manual_review_status": "approved"
+  }
+}

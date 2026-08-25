@@ -330,6 +330,30 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(failed_task["failed_stage"], "preflight")
         self.assertIn("API key", failed_task["error"])
 
+    def test_start_rejects_invalid_creator_profile_before_pipeline_steps(self):
+        """Creator consent metadata must pass before LLM, TTS, or materials run."""
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", encoding="utf-8") as profile:
+            profile.write('{"creator_profile_id": "creator-001"}')
+            profile.flush()
+            params = VideoParams(
+                video_subject="test",
+                creator_profile_file=profile.name,
+            )
+            state = MemoryState()
+            with (
+                patch.object(tm, "generate_script") as generate_script,
+                patch.object(tm, "generate_audio") as generate_audio,
+                patch.object(tm, "get_video_materials") as get_materials,
+                patch.object(tm.sm, "state", state),
+            ):
+                result = tm.start("invalid-creator-profile", params)
+
+        generate_script.assert_not_called()
+        generate_audio.assert_not_called()
+        get_materials.assert_not_called()
+        self.assertEqual(result["failed_stage"], "preflight")
+        self.assertIn("invalid creator profile", result["error"])
+
     def test_start_does_not_require_sonilo_key_when_volume_is_zero(self):
         """0 音量不会使用 Sonilo，因此缺少 Key 时仍应进入正常任务流水线。"""
         params = VideoParams(
@@ -568,6 +592,31 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(failed_task["failed_stage"], "audio")
         self.assertIn("does not exist", failed_task["error"])
 
+    def test_native_speech_avatar_requires_explicit_native_audio(self):
+        task_id = "test-native-speech-avatar-requires-audio"
+        params = VideoParams(
+            video_subject="native speech avatar",
+            video_script="script",
+            audio_mode="native_speech_avatar",
+        )
+        state = MemoryState()
+
+        with (
+            patch.object(tm.voice, "tts") as tts,
+            patch.object(tm.sm, "state", state),
+        ):
+            audio_file, audio_duration, sub_maker = tm.generate_audio(
+                task_id, params, "script"
+            )
+
+        self.assertIsNone(audio_file)
+        self.assertIsNone(audio_duration)
+        self.assertIsNone(sub_maker)
+        tts.assert_not_called()
+        failed_task = state.get_task(task_id)
+        self.assertEqual(failed_task["failed_stage"], "audio")
+        self.assertIn("custom audio file", failed_task["error"])
+
     def test_generate_subtitle_uses_whisper_for_custom_audio_without_sub_maker(self):
         """
         自定义音频不会经过 TTS，所以没有 sub_maker。
@@ -749,6 +798,91 @@ class TestTaskService(unittest.TestCase):
 
                 self.assertEqual(result, expected)
                 generate_final.assert_not_called()
+
+    def test_loomloom_materials_fail_closed_without_confirmed_request(self):
+        """Paid video materials must not reach the provider without a quote confirmation."""
+        params = VideoParams(video_subject="Coffee", video_source="loomloom")
+        state = MemoryState()
+        state.update_task("loomloom-no-confirm", state=tm.const.TASK_STATE_PROCESSING)
+
+        with (
+            patch.object(tm.sm, "state", state),
+            patch.object(tm.material, "download_videos") as download_videos,
+        ):
+            result = tm.get_video_materials(
+                "loomloom-no-confirm", params, ["coffee"], audio_duration=5
+            )
+
+        self.assertIsNone(result)
+        download_videos.assert_not_called()
+        failed_task = state.get_task("loomloom-no-confirm")
+        self.assertEqual(failed_task["failed_stage"], "materials")
+        self.assertIn("confirmed quote", failed_task["error"])
+
+    def test_loomloom_materials_reuse_confirmed_request_and_existing_task_dir(self):
+        """Confirmed B-roll reuses the normal task directory and remains audio-neutral."""
+        params = VideoParams(video_subject="Coffee", video_source="loomloom")
+        settings = tm.loomloom.LoomLoomSettings(
+            base_url="https://example.test/loom/v1",
+            api_token="process-only-token",
+            market_listing_id="video-listing",
+        )
+        request = tm.loomloom.LoomLoomConfirmedVideoRequest(
+            settings=settings,
+            batch=(batch := tm.loomloom.LoomLoomVideoBatch(
+                input_rows=({"scenePrompt": "coffee", "aspectRatio": "9:16"},)
+            )),
+            listing_version_id="quoted-version",
+            client_request_id="stable-request",
+            quote=tm.loomloom.LoomLoomQuote(
+                quote_id="quote-1",
+                listing_version_id="quoted-version",
+                currency="T",
+                task_count=1,
+                estimated_buyer_payable_t=1,
+                estimated_buyer_payable_amount="0.001",
+                input_rows=batch.input_rows,
+            ),
+            budget_limit_t=2,
+        )
+        backend = MagicMock()
+        backend.execute.return_value = tm.loomloom.LoomLoomExecution(
+            run_id="run-1",
+            transaction_id="transaction-1",
+            transaction_status="running",
+            listing_version_id="quoted-version",
+        )
+        backend.download_video_results.return_value = ("task/loomloom-video-01.mp4",)
+        state = MemoryState()
+        state.update_task("loomloom-confirmed", state=tm.const.TASK_STATE_PROCESSING)
+
+        with (
+            patch.object(tm.sm, "state", state),
+            patch.object(tm.loomloom, "LoomLoomVideoBackend", return_value=backend),
+            patch.object(tm.utils, "task_dir", return_value="/tmp/task-dir"),
+        ):
+            result = tm.get_video_materials(
+                "loomloom-confirmed",
+                params,
+                ["coffee"],
+                audio_duration=5,
+                loomloom_video_request=request,
+            )
+
+        self.assertEqual(result, ["task/loomloom-video-01.mp4"])
+        backend.execute.assert_called_once_with(
+            request.batch,
+            client_request_id="stable-request",
+            listing_version_id="quoted-version",
+            confirm=True,
+        )
+        backend.wait_for_run.assert_called_once_with("run-1")
+        backend.download_video_results.assert_called_once_with(
+            "run-1", "/tmp/task-dir"
+        )
+        task = state.get_task("loomloom-confirmed")
+        self.assertEqual(task["loomloom_run_id"], "run-1")
+        self.assertNotIn("process-only-token", repr(task))
 
     def test_start_completes_video_without_cross_posting(self):
         """

@@ -1,0 +1,23 @@
+{
+  "creator_profile_id": "creator-replace-me",
+  "tenant_id": "zhenhe",
+  "brand_id": "zhenhe-ai",
+  "voice": {
+    "asset_ref": "asset-voice-replace-me",
+    "consent_status": "replace_me",
+    "usage_scope": "replace with the exact approved usage scope",
+    "source": "user_recording",
+    "expires_at": "",
+    "revoked_at": null,
+    "manual_review_status": "pending"
+  },
+  "avatar": {
+    "asset_ref": "asset-avatar-replace-me",
+    "consent_status": "replace_me",
+    "usage_scope": "replace with the exact approved usage scope",
+    "source": "user_provided_still",
+    "expires_at": "",
+    "revoked_at": null,
+    "manual_review_status": "pending"
+  }
+}

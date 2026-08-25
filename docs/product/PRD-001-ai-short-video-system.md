@@ -139,15 +139,26 @@ Scene 必須可以獨立重做，不得因單一場景失敗而重做整支影�
 
 - 旁白預設採一次產生的 Master Voice。
 - 不得讓每個影片場景各自產生不一致的人聲。
-- 主要旁白不得依賴生成式影片的原生音訊。
+- 一般 image／motion／B-roll 場景不得依賴生成式影片的原生音訊；若 Scene 明確標記為 `native_speech_avatar`，則 provider 產生且已與嘴型同步的原生音訊就是該 Scene 的 authoritative voice，後製不得再接另一條 TTS 或錄音軌。
+- `native_speech_avatar` 必須同時具備可解碼的原生音訊、voice selection／source record 與人工影音 QA；音訊缺失、角色與聲音不符、或改接其他 voice 時，必須退回 visual-only／重新生成，不得宣稱已完成對嘴。
 - 字幕、數字、Logo、網址、CTA、QR Code、免責文字與品牌標題全部由後製層產生。
 - 字幕時間軸應能對應旁白句子或單字時間軸。
 
+### FR-004A：Creator Profile 與創作者素材
+
+V0 可為每位創作者建立 Creator Profile，僅引用已明確同意的 voice／avatar asset；每個引用都必須記錄 consent／usage scope、source、expiry／revocation 與 manual review 狀態。
+
+- Voice 可選 `improved TTS`、使用者提供的錄音，或由 Provider 產生後人工匯入的 voice output；匯入結果只能作為一個 `Master Voice` asset。不得默默 clone、模仿或揭露任何人的可識別身分。
+- Avatar 可選使用者提供的 still／image-motion，或預先渲染的 talking-head／avatar MP4，均以 scene asset 人工匯入；含原生對白的 MP4 必須標記 `native_speech_avatar` 並保留原生音訊，不得直接自動呼叫 Video／Avatar Provider。
+- 任何 biometric material、secret、credential 或原始敏感內容不得出現在 log、audit 摘要或 prompt；未取得明確同意、已過期、已撤回或未完成人工審核的 reference 不得進入 render。
+
 ### FR-005：人工補入素材
 
-V0 必須支援等待人工素材的明確狀態。人工可使用 Assisted Qwen 產圖、使用 Manual Google Flow 產生少量影片、選擇結果並放入指定 Scene 目錄、匯入既有聲音／圖片／影片。
+V0 必須支援等待人工素材的明確狀態。人工可使用 Assisted Qwen 產圖、使用 Manual Google Flow 產生少量影片、選擇結果並放入指定 Scene 目錄、匯入既有聲音／圖片／影片；Creator Profile 的 voice／avatar reference 也必須經 Asset Import 進入 Job。
 
 系統必須驗證檔案類型、檔案大小、尺寸、時長、Scene ID 與 checksum。
+
+真人 voice／avatar 進入 render 前，必須先通過 Creator Profile preflight：`consent_status` 必須是 `explicit_granted`、usage scope／source 不得為空、expiry 未到、未撤回且 `manual_review_status=approved`。Profile 只能保存 opaque asset reference，不得保存原始照片、聲音、base64、secret 或 credential。
 
 ### FR-006：Scene fallback
 
@@ -212,7 +223,30 @@ Provider 只有在以下四項都通過後，才能進入 Automated 候選：
 
 若只通過互動登入而未通過正式 API contract，Provider 的狀態只能是 `ASSISTED_ONLY`，不能被背景 Job 自動 fallback。
 
+### 5.3A：可選的 LoomLoom AI B-roll 素材來源
+
+本 fork 可選擇 upstream 的 LoomLoom／勝算云素材模式，作為既有本機 Renderer
+的 B-roll 來源，不改變本產品的 Gemini、Grok、Qwen Assisted／Automated 授權政策：
+
+- `video_source=loomloom` 預設關閉；每次請求先建立 1～5 段素材的報價，只有使用者確認目前報價後才允許付費執行。產品 UI 仍以最多 3 段 generated video Scene 為 V0 上限。
+- 產出的素材必須是無旁白、無字幕、無 Logo 的 `video/mp4` B-roll；旁白、字幕、BGM 與最終合成繼續使用既有流程。
+- 若目前 LLM Provider 明確選為勝算云，可明確重用該 Provider key；其他 Provider 只能使用獨立 LoomLoom key，不能讀環境變數、不能把 Gemini／Grok／Qwen session token 靜默轉成 API key。
+- quote 的 listing version 與 stable client request ID 必須進入同一個進程內 confirmed request；secret 不得進入 `VideoParams`、任務狀態、歷史或 log。暫時錯誤重試只能重用同一 request ID。
+- 只接受單一 HTTPS `video/mp4` result artifact，下載有大小上限並以 `.part` 原子替換；錯誤、缺素材或成本不明時 fail closed 或轉人工處理。
+
+這條路徑只代表技術 adapter 與 fake-session／本機流程驗證；沒有真實勝算云帳號、餘額或 live generation proof 時，不得宣稱 Provider 已可生產使用。
+
 Capability status 使用小寫 `ready`、`manual_reauth_required`、`manual_action_required`、`provider_unavailable`；selector decision status 使用 `ASSISTED_READY`、`AUTOMATED_READY`、`ASSISTED_ONLY`、`MANUAL_ACTION_REQUIRED`、`PROVIDER_UNAVAILABLE`。
+
+### 5.4 Creator asset provider boundary
+
+V0 只允許人工匯入已取得明確同意的 creator voice／avatar asset。自動 voice／avatar cloning 與 lip-sync provider call 一律 deferred／manual-only；在正式 Video/Avatar Provider contract 通過前，不得加入直接 provider automation。該 contract 至少要定義：
+
+- credential mode、`auth_mode`、`execution_mode` 與憑證來源。
+- `request_id`、`external_job_id` 與 idempotency。
+- estimated／actual cost。
+- deletion／retention policy。
+- technical、consent 與 content QA。
 
 ## 6. MoneyPrinterTurbo 基線與調整
 
@@ -228,13 +262,14 @@ Capability status 使用小寫 `ready`、`manual_reauth_required`、`manual_acti
 6. 優先重用既有本機 Renderer；不在 V0 先加入 Cloudflare Containers 或大型事件系統。
 7. 在既有 LLM Registry 上增加產品層的 `auth_mode`／`execution_mode` 判斷；不把上游 API Key adapter 改寫成 OAuth token adapter。
 
-## 7. 明確不做
+## 7. V0 邊界與明確不做
+
+Creator Profile 的明確同意 voice／avatar reference，以及人工匯入的 user-provided still／image-motion、預先渲染 talking-head／avatar MP4，均屬 V0 範圍；自動 voice／avatar cloning 與 lip-sync provider call 則 deferred／manual-only，直到正式 Video/Avatar Provider contract 通過。
 
 - 自動品牌定位與全網趨勢搜尋。
 - 完整多租戶登入、RBAC、Billing 與客戶 BYOK。
 - 自動公開發布。
 - 完整 Analytics Learning Loop。
-- 數位人逐字對嘴。
 - 同一場景多 Provider 競賽。
 - Cloudflare Container 正式部署。
 - 將 Qwen Code Token Plan 或 Google AI Pro 權益當成後端 API 額度；官方 ModelStudio Token Plan endpoint 仍須獨立通過 Automated contract。
@@ -250,6 +285,11 @@ POC 至少完成 5 支實際影片，並符合：
 - 每支最多 3 個 AI 影片 Scene。
 - 任一 Scene 可獨立重做或 fallback。
 - 全片使用一致的 Master Voice。
+- Creator Profile 的 voice／avatar reference 具備明確 consent、usage scope、source、expiry／revocation 與 manual review 記錄。
+- Voice 只接受 `improved TTS`、使用者錄音，或人工匯入的 provider-generated voice output；匯入結果是唯一 Master Voice，沒有 silent cloning 或 identity exposure。
+- Avatar 只接受人工匯入的 still／image-motion 或預先渲染 talking-head／avatar MP4；沒有未通過 contract 的直接 Video／Avatar Provider automation。
+- `native_speech_avatar` 必須保留 provider 原生音訊；不得以不同性別／不同人物 voice 覆蓋，且須通過同一支片的音訊與嘴型人工 QA。
+- 真人素材若沒有同一支 provider talking-head MP4 的原生音訊，只能走 `master_voice` 旁白模式，不得宣稱為 lip-sync。
 - 字幕與旁白基本同步。
 - 輸出為 1080×1920、H.264/AAC。
 - 所有素材、Provider 呼叫與成本可追溯。
@@ -270,7 +310,9 @@ POC 至少完成 5 支實際影片，並符合：
 3. Assisted Qwen 與 Manual Google Flow 是否接受人工補素材。
 4. 單支 API 預算上限是否採 US$3。
 5. 是否先以本機 Renderer 做 V0，不先做 Cloudflare Runtime 遷移。
-6. 是否接受一般 TTS／既有錄音，暫不做數位人對嘴。
-7. 是否允許所有成片在人工核准前只停留在 Draft。
+6. 首批 Creator Profile 採用哪些 voice／avatar reference，以及 consent owner、usage scope、source、expiry／revocation 與 manual review owner。
+7. 是否在首批 POC 使用 provider-generated voice output；若使用，僅能人工匯入為 Master Voice，不代表可直接呼叫 cloning provider。
+8. Video/Avatar Provider contract 的 owner、deletion／retention policy 與 QA sign-off。
+9. 是否允許所有成片在人工核准前只停留在 Draft。
 
-> 目前未進行功能程式修改；本文件本身是等待核准的產品草案。
+> 本文件仍是產品草案；本輪已依目前 POC 方向開始素材匯入驗證實作，但不代表 Video／Avatar Provider 已可自動化或已部署。

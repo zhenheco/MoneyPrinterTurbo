@@ -167,6 +167,13 @@ LLM_PROVIDER_REGISTRY = (
         default_model="mimo-v2.5-pro",
         default_base_url="https://api.xiaomimimo.com/v1",
     ),
+    LLMProviderSpec(
+        "shengsuanyun",
+        "Shengsuan Cloud",
+        api_key_url="https://console.shengsuanyun.com/user/keys",
+        default_model="deepseek/deepseek-v4-flash",
+        default_base_url="https://router.shengsuanyun.com/api/v1",
+    ),
     # 聚合与统一接入平台
     LLMProviderSpec(
         "cloudflare",

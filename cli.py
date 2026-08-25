@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 DEFAULT_VOICE_NAME = "zh-CN-XiaoxiaoNeural-Female"
 _PIPELINE_STAGES = ("script", "terms", "audio", "subtitle", "materials", "video")
 _CUSTOM_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+_AUDIO_MODES = ("master_voice", "native_speech_avatar")
 
 
 class _CliHelpFormatter(
@@ -232,6 +233,17 @@ Output and exit status:
         help="stop after this pipeline stage; see the stage order below",
     )
 
+    profile_group = parser.add_argument_group("creator profile")
+    profile_group.add_argument(
+        "--creator-profile",
+        default=None,
+        metavar="PATH",
+        help=(
+            "JSON consent metadata for an approved creator voice/avatar; the file "
+            "must contain references only, never raw media or credentials"
+        ),
+    )
+
     video_group = parser.add_argument_group("video output")
     video_group.add_argument(
         "--video-count",
@@ -283,6 +295,15 @@ Output and exit status:
     )
 
     audio_group = parser.add_argument_group("voiceover and background music")
+    audio_group.add_argument(
+        "--audio-mode",
+        choices=_AUDIO_MODES,
+        default="master_voice",
+        help=(
+            "audio contract; native_speech_avatar preserves a provider-generated "
+            "talking-head asset's voice and requires --custom-audio-file"
+        ),
+    )
     audio_group.add_argument(
         "--voice-name",
         default=DEFAULT_VOICE_NAME,
@@ -467,6 +488,16 @@ Output and exit status:
     if args.video_source != "local" and has_video_materials:
         parser.error("--video-materials can only be used with --video-source local")
 
+    if (
+        args.audio_mode == "native_speech_avatar"
+        and args.stop_at not in {"script", "terms"}
+        and not (args.custom_audio_file or "").strip()
+    ):
+        parser.error(
+            "--audio-mode native_speech_avatar requires --custom-audio-file "
+            "from the same provider-generated video asset"
+        )
+
     if args.bgm_file:
         if args.bgm_type in (None, "custom"):
             args.bgm_type = "custom"
@@ -526,6 +557,8 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_materials": video_materials,
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,
+        "audio_mode": args.audio_mode,
+        "creator_profile_file": args.creator_profile,
         "voice_name": args.voice_name,
         "subtitle_enabled": args.subtitle_enabled,
     }
@@ -653,6 +686,7 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
     """
     from app.models import const
     from app.services import bgm as bgm_service
+    from app.services import creator_profile as creator_profile_service
     from app.utils import utils
 
     local_material_extensions = {
@@ -661,6 +695,13 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
         ".avi",
         ".flv",
     }
+
+    if params.creator_profile_file:
+        params.creator_profile_file = _resolve_cli_file(
+            params.creator_profile_file,
+            description="creator profile",
+        )
+        creator_profile_service.load_creator_profile(params.creator_profile_file)
 
     if params.custom_audio_file:
         params.custom_audio_file = _resolve_cli_file(

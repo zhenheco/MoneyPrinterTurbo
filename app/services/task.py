@@ -16,8 +16,10 @@ from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
+    creator_profile,
     elevenlabs_music,
     llm,
+    loomloom,
     material,
     sonilo,
     subtitle,
@@ -52,6 +54,8 @@ _ACTIVE_CROSS_POST_STATES = {
 }
 _CROSS_POST_STATE_WRITE_ATTEMPTS = 3
 _CROSS_POST_STATE_RETRY_DELAY_SECONDS = 0.1
+_LOOMLOOM_STATE_WRITE_ATTEMPTS = 3
+_LOOMLOOM_STATE_RETRY_DELAY_SECONDS = 0.1
 _INTERRUPTED_CROSS_POST_ERROR = (
     "cross-posting was interrupted before the process completed"
 )
@@ -226,7 +230,12 @@ def _is_cross_post_owner_alive(owner: str | None) -> bool:
     return True
 
 
-def _mark_task_failed(task_id: str, stage: str, error: str) -> dict:
+def _mark_task_failed(
+    task_id: str,
+    stage: str,
+    error: str,
+    details: dict | None = None,
+) -> dict:
     """记录结构化失败信息，并保留任务失败前已经到达的进度。"""
     existing_task = None
     try:
@@ -255,12 +264,15 @@ def _mark_task_failed(task_id: str, stage: str, error: str) -> dict:
         "failed_stage": stage,
         "error": message,
     }
+    if details:
+        failure.update(details)
     sm.state.update_task(
         task_id,
         state=failure["state"],
         progress=failure["progress"],
         failed_stage=failure["failed_stage"],
         error=failure["error"],
+        **(details or {}),
     )
     return failure
 
@@ -451,6 +463,16 @@ def generate_audio(task_id, params, video_script, voice_preview=None):
     # /audio 和 /subtitle 请求模型不包含 custom_audio_file，
     # 这里统一做兼容读取，避免直调接口时抛属性错误。
     requested_custom_audio_file = getattr(params, "custom_audio_file", None)
+    if (
+        getattr(params, "audio_mode", "master_voice") == "native_speech_avatar"
+        and not (requested_custom_audio_file or "").strip()
+    ):
+        _mark_task_failed(
+            task_id,
+            "audio",
+            "native_speech_avatar requires a custom audio file from the same provider asset",
+        )
+        return None, None, None
     try:
         custom_audio_file = resolve_custom_audio_file(
             task_id, requested_custom_audio_file
@@ -563,7 +585,13 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
-def get_video_materials(task_id, params, video_terms, audio_duration):
+def get_video_materials(
+    task_id,
+    params,
+    video_terms,
+    audio_duration,
+    loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
+):
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -577,6 +605,95 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             )
             return None
         return [material_info.url for material_info in materials]
+    elif params.video_source == "loomloom":
+        if not isinstance(
+            loomloom_video_request, loomloom.LoomLoomConfirmedVideoRequest
+        ):
+            _mark_task_failed(
+                task_id,
+                "materials",
+                "LoomLoom video generation requires a confirmed quote",
+            )
+            return None
+
+        request = loomloom_video_request
+        logger.info(
+            "\n\n## generating "
+            f"{len(request.batch.input_rows)} video materials with LoomLoom"
+        )
+        run_id = ""
+        try:
+            request.validate()
+            existing_task = sm.state.get_task(task_id)
+            if existing_task is None:
+                raise loomloom.LoomLoomRunError(
+                    "cannot start LoomLoom without a durable task record"
+                )
+            if existing_task.get("loomloom_run_id") or existing_task.get(
+                "loomloom_execute_state"
+            ) in {"execute_pending", "submitted", "manual_recovery_required"}:
+                raise loomloom.LoomLoomRunError(
+                    "this task already has a LoomLoom execution record; manual "
+                    "recovery is required before another paid request"
+                )
+            if not _persist_loomloom_execution_intent(task_id, request):
+                raise loomloom.LoomLoomRunError(
+                    "could not persist the LoomLoom execution intent; no paid "
+                    "request was sent"
+                )
+            backend = loomloom.LoomLoomVideoBackend(request.settings)
+            execution = backend.execute(
+                request.batch,
+                client_request_id=request.client_request_id,
+                listing_version_id=request.listing_version_id,
+                confirm=True,
+            )
+            run_id = execution.run_id
+            logger.info(
+                "LoomLoom paid video run created: "
+                f"task_id={task_id}, run_id={run_id}, "
+                f"listing_version_id={request.listing_version_id}"
+            )
+            if not _record_loomloom_run_reference(
+                task_id=task_id,
+                run_id=run_id,
+                listing_version_id=request.listing_version_id,
+            ):
+                raise loomloom.LoomLoomRunError(
+                    f"LoomLoom run {run_id} was created but could not be persisted; "
+                    "manual recovery is required"
+                )
+            backend.wait_for_run(run_id)
+            materials = list(
+                backend.download_video_results(
+                    run_id,
+                    utils.task_dir(task_id),
+                )
+            )
+            _patch_loomloom_state(
+                task_id,
+                {
+                    "loomloom_execute_state": "completed",
+                    "loomloom_cost_status": "actual_unknown",
+                },
+            )
+            return materials
+        except (loomloom.LoomLoomError, ValueError) as exc:
+            _mark_task_failed(
+                task_id,
+                "materials",
+                str(exc),
+                details={
+                    "loomloom_run_id": run_id,
+                    "loomloom_listing_version_id": request.listing_version_id,
+                    "loomloom_execute_state": (
+                        "manual_recovery_required" if run_id else "not_started"
+                    ),
+                    "loomloom_cost_status": "unknown" if run_id else "not_charged",
+                    "loomloom_manual_recovery_required": bool(run_id),
+                },
+            )
+            return None
     else:
         logger.info(f"\n\n## downloading videos from {params.video_source}")
         # 顺序匹配模式只在用户显式开启时生效。这里强制素材下载按关键词顺序
@@ -603,6 +720,73 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             )
             return None
         return downloaded_videos
+
+
+def _persist_loomloom_execution_intent(
+    task_id: str, request: loomloom.LoomLoomConfirmedVideoRequest
+) -> bool:
+    """Persist the no-secret paid request identity before execute."""
+    return _patch_loomloom_state(
+        task_id,
+        {
+            "loomloom_quote_id": request.quote.quote_id,
+            "loomloom_client_request_id": request.client_request_id,
+            "loomloom_listing_version_id": request.listing_version_id,
+            "loomloom_execute_state": "execute_pending",
+            "loomloom_estimated_cost_t": request.quote.estimated_buyer_payable_t,
+            "loomloom_budget_limit_t": int(request.budget_limit_t),
+            "loomloom_currency": request.quote.currency,
+            "loomloom_cost_status": "estimated",
+        },
+    )
+
+
+def _record_loomloom_run_reference(
+    *, task_id: str, run_id: str, listing_version_id: str
+) -> bool:
+    """Persist a paid run identity before polling or downloading its results."""
+    return _patch_loomloom_state(
+        task_id,
+        {
+            "loomloom_run_id": run_id,
+            "loomloom_listing_version_id": listing_version_id,
+            "loomloom_execute_state": "submitted",
+            "loomloom_cost_status": "actual_unknown",
+            "loomloom_actual_cost_t": None,
+        },
+    )
+
+
+def _patch_loomloom_state(task_id: str, fields: dict) -> bool:
+    """Retry a no-secret LoomLoom state transition and fail closed on ambiguity."""
+    for attempt in range(1, _LOOMLOOM_STATE_WRITE_ATTEMPTS + 1):
+        try:
+            updated = sm.state.patch_task(task_id, **fields)
+        except Exception as exc:
+            if attempt >= _LOOMLOOM_STATE_WRITE_ATTEMPTS:
+                logger.exception(
+                    "failed to persist LoomLoom state after retries: "
+                    f"task_id={task_id}, fields={sorted(fields)}, attempts={attempt}, "
+                    f"error={exc}"
+                )
+                return False
+            logger.warning(
+                "retry LoomLoom state update: "
+                f"task_id={task_id}, fields={sorted(fields)}, attempt={attempt}, "
+                f"error={exc}"
+            )
+            time.sleep(_LOOMLOOM_STATE_RETRY_DELAY_SECONDS)
+            continue
+
+        if updated is False:
+            logger.warning(
+                "could not persist LoomLoom state because task is missing: "
+                f"task_id={task_id}, fields={sorted(fields)}"
+            )
+            return False
+        return True
+
+    return False
 
 
 def generate_final_videos(
@@ -1045,9 +1229,21 @@ def _run_pipeline(
     params: VideoParams,
     stop_at: str = "video",
     voice_preview: dict | None = None,
+    loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+
+    creator_profile_file = getattr(params, "creator_profile_file", None)
+    if creator_profile_file:
+        try:
+            creator_profile.load_creator_profile(creator_profile_file)
+        except creator_profile.CreatorProfileError as exc:
+            return _mark_task_failed(
+                task_id,
+                "preflight",
+                f"invalid creator profile: {exc}",
+            )
 
     # 只有完整成片流程需要视频配乐供应商。尽早阻止缺少 Key 的完整任务，避免
     # 先消耗 LLM、TTS 和素材服务额度；中间产物接口仍可独立使用。
@@ -1170,7 +1366,11 @@ def _run_pipeline(
 
     # 5. Get video materials
     downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
+        task_id,
+        params,
+        video_terms,
+        audio_duration,
+        loomloom_video_request=loomloom_video_request,
     )
     if not downloaded_videos:
         return _mark_task_failed(
@@ -1279,6 +1479,7 @@ def start(
     params: VideoParams,
     stop_at: str = "video",
     voice_preview: dict | None = None,
+    loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
     """执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。"""
     try:
@@ -1287,6 +1488,7 @@ def start(
             params,
             stop_at=stop_at,
             voice_preview=voice_preview,
+            loomloom_video_request=loomloom_video_request,
         )
     except Exception as exc:
         logger.exception(

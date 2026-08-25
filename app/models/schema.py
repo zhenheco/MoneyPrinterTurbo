@@ -31,6 +31,11 @@ class VideoTransitionMode(str, Enum):
     zoom_out = "ZoomOut"
 
 
+class VideoAudioMode(str, Enum):
+    master_voice = "master_voice"
+    native_speech_avatar = "native_speech_avatar"
+
+
 class VideoAspect(str, Enum):
     landscape = "16:9"
     portrait = "9:16"
@@ -93,6 +98,8 @@ class VideoParams(BaseModel):
     )
     
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore TTS and can still use Whisper subtitles
+    audio_mode: Optional[VideoAudioMode] = VideoAudioMode.master_voice.value
+    creator_profile_file: Optional[str] = None
     video_language: Optional[str] = ""  # auto detect
 
     voice_name: Optional[str] = ""

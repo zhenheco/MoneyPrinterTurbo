@@ -33,6 +33,7 @@ from app.models.schema import (
 from app.services import bgm as bgm_service
 from app.services import state as sm
 from app.services import task as tm
+from app.services import video_material as video_material_service
 from app.utils import file_security, utils
 
 # 认证依赖项
@@ -401,30 +402,55 @@ def get_video_materials_list(request: Request):
 @router.post(
     "/video_materials",
     response_model=VideoMaterialUploadResponse,
-    summary="Upload the video material file to the local videos directory",
+    summary="Validate and upload a video material file",
+    description=(
+        "Validate a decodable video or image material up to 500 MB and store it "
+        "under storage/local_videos."
+    ),
+    responses={
+        400: {"description": "The filename, format, size, or media stream is invalid"},
+        500: {"description": "FFmpeg validation or persistent storage is unavailable"},
+    },
 )
 def upload_video_material_file(request: Request, file: UploadFile = File(...)):
     request_id = base.get_task_id(request)
     safe_filename = _sanitize_upload_filename(file.filename, request_id)
-    # check file ext
-    allowed_suffixes = ("mp4", "mov", "avi", "flv", "mkv", "jpg", "jpeg", "png")
-    suffix = pathlib.Path(safe_filename).suffix.lower().lstrip(".")
-    # 按完整扩展名校验，既兼容 .MOV 这类大写后缀，也避免 photojpg 这种没有
-    # 点号的文件名因为 endswith("jpg") 被误当成合法图片。
-    if suffix in allowed_suffixes:
-        local_videos_dir = utils.storage_dir("local_videos", create=True)
-        save_path = os.path.join(local_videos_dir, safe_filename)
-        # save file
-        with open(save_path, "wb+") as buffer:
-            # If the file already exists, it will be overwritten
-            file.file.seek(0)
-            buffer.write(file.file.read())
-        response = {"file": safe_filename}
-        return utils.get_response(200, response)
+    if pathlib.Path(safe_filename).suffix.lower() not in video_material_service.SUPPORTED_VIDEO_MATERIAL_EXTENSIONS:
+        allowed_suffixes = ", ".join(
+            extension.removeprefix(".")
+            for extension in video_material_service.SUPPORTED_VIDEO_MATERIAL_EXTENSIONS
+        )
+        raise HttpException(
+            task_id=request_id,
+            status_code=400,
+            message=f"{request_id}: Only files with extensions {allowed_suffixes} can be uploaded",
+        )
 
-    raise HttpException(
-        "", status_code=400, message=f"{request_id}: Only files with extensions {', '.join(allowed_suffixes)} can be uploaded"
-    )
+    try:
+        stored_filename = video_material_service.save_video_material_upload(
+            safe_filename,
+            file.file,
+        )
+    except video_material_service.VideoMaterialUploadError as exc:
+        logger.warning(
+            f"video material upload rejected: request_id={request_id}, error={str(exc)}"
+        )
+        raise HttpException(
+            task_id=request_id,
+            status_code=400,
+            message=f"{request_id}: {str(exc)}",
+        )
+    except video_material_service.VideoMaterialServiceError as exc:
+        logger.error(
+            f"video material upload failed: request_id={request_id}, error={str(exc)}"
+        )
+        raise HttpException(
+            task_id=request_id,
+            status_code=500,
+            message=f"{request_id}: video material validation is unavailable",
+        )
+
+    return utils.get_response(200, {"file": stored_filename})
 
 @router.get("/stream/{file_path:path}")
 async def stream_video(request: Request, file_path: str):
