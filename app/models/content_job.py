@@ -180,12 +180,21 @@ class ProviderEvent(BaseModel):
 
 
 class UsageLedgerEntry(BaseModel):
-    """The billing-relevant subset of SPEC-001 §4.6.
+    """The billing-relevant subset of SPEC-001 §4.6, plus the §10 columns.
 
-    SPEC-001 gives one JSON example for both the provider event and the usage
-    ledger, so this carries no field the example does not define: it is the
-    provider event minus the request/response and error columns, keyed by
-    ``idempotency_key`` so a resumed job cannot be billed twice.
+    The first ten fields are the §4.6 example minus the request/response and
+    error columns, keyed by ``idempotency_key`` so a resumed job cannot be
+    billed twice. The remaining four are what §10 additionally requires kept:
+    the source behind an estimate, the images/videos that were thrown away, the
+    seconds of video actually adopted, and the effective cost of each of those
+    seconds. They default to "no such information", never to zero — §10 forbids
+    presenting an unknown cost as ``0``.
+
+    All fourteen columns are always serialized, including the four whose value
+    is the default. A column that disappeared when it held nothing would make a
+    reader's ``payload.get(name, 0)`` produce exactly the fabricated zero §10
+    forbids, and would leave "adopted no seconds" indistinguishable from "this
+    call recorded no seconds".
     """
 
     model_config = _STRICT
@@ -200,6 +209,16 @@ class UsageLedgerEntry(BaseModel):
     estimated_cost_usd: float
     actual_cost_usd: CostUsd
     created_at: str
+
+    #: §10 「保留估算來源」 — mandatory once ``actual_cost_usd`` is ``"unknown"``.
+    estimated_cost_source: str = ""
+    #: §10 「被放棄的圖片／影片」 — asset ids generated for this call and dropped.
+    discarded_asset_ids: List[str] = []
+    #: §10 「最終採用影片秒數」 — seconds of this call's output that shipped.
+    adopted_video_seconds: float = 0.0
+    #: §10 「每個採用影片秒數的有效成本」 — ``"unknown"`` whenever the actual cost
+    #: or the adopted duration is unknown, so it is never a fabricated zero.
+    effective_cost_per_adopted_second_usd: CostUsd = "unknown"
 
 
 class RenderCanvas(BaseModel):

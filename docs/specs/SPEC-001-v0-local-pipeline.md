@@ -244,6 +244,31 @@ V0 的 `avatar` 只代表人工匯入的 user-provided still／image-motion 或�
 
 完整憑證、API Key、Authorization header 與敏感回應不得寫入摘要欄位。
 
+上面是 Provider Event。Usage Ledger 是另一份契約：每次呼叫一筆，只留計費相關欄位，不含 request／response 摘要與錯誤欄位，並額外保存 §10 要求的估算來源、被放棄素材、採用秒數與每秒有效成本。
+
+~~~json
+{
+  "provider_event_id": "provider-event-001",
+  "content_job_id": "job-20260816-001",
+  "scene_id": "scene-001",
+  "provider": "manual_google_flow",
+  "model": "",
+  "idempotency_key": "job-20260816-001:scene-001:video:attempt-2",
+  "attempt_count": 2,
+  "estimated_cost_usd": 0.9,
+  "actual_cost_usd": 0.9,
+  "created_at": "2026-08-16T09:00:00+00:00",
+  "estimated_cost_source": "rate card 2026-08, 0.15 USD/sec",
+  "discarded_asset_ids": ["asset-011", "asset-012"],
+  "adopted_video_seconds": 6.0,
+  "effective_cost_per_adopted_second_usd": 0.15
+}
+~~~
+
+上面 14 個欄位是 Usage Ledger 的恆定形狀：每一筆都必須寫滿，沒有該資訊的欄位寫其預設值而不是省略。省略會讓讀取端的 `payload.get(k, 0)` 得到 §10 禁止的偽零，也讓「確實採用 0 秒」與「沒有記錄」無法區分。`actual_cost_usd` 為 `"unknown"` 時 `estimated_cost_source` 必填，且 `effective_cost_per_adopted_second_usd` 一併為 `"unknown"`，不得寫 0；`adopted_video_seconds` 為 0 時同樣寫 `"unknown"`。重試成本以「一次嘗試一筆」表達：attempt-1 與 attempt-2 是兩個 idempotency key、兩筆帳。
+
+每寫入一筆 ledger，`ContentJob.actual_cost_usd` 必須同步更新為 ledger 的累計金額——那正是 §10 閘門讀取的欄位。未回寫則閘門永遠拿初始值比對，一串個別看來付得起的呼叫可以無上限地花下去。累計時 `actual_cost_usd` 為 `"unknown"` 的那筆以其 `estimated_cost_usd` 計入，不得計為 0。
+
 ## 5. Job 狀態機
 
 ### 5.1 狀態

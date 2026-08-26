@@ -241,11 +241,17 @@ REJECTION_CASES = (
 class TestContentJobModels:
     @pytest.mark.parametrize("model, payload_factory", ACCEPTED_CASES)
     def test_valid_payload_round_trips_every_field(self, model, payload_factory):
+        """Every field the payload states comes back holding the same value.
+
+        A subset comparison, because a model may carry columns the §4.x example
+        predates: the contract under test is that nothing the payload said is
+        lost or altered, not that the model has no other fields.
+        """
         payload = payload_factory()
 
-        parsed = model.model_validate(payload)
+        dump = model.model_validate(payload).model_dump(mode="json")
 
-        assert parsed.model_dump(mode="json") == payload
+        assert {name: dump[name] for name in payload} == payload
 
     @pytest.mark.parametrize("model, payload_factory, removed_field", MISSING_FIELD_CASES)
     def test_missing_required_field_names_the_field(
