@@ -43,7 +43,7 @@ from __future__ import annotations
 import math
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import Any, Iterable, Optional, Sequence
 
 from app.models.content_job import (
     ContentJob,
