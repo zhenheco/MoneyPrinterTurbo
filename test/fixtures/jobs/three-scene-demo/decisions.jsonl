@@ -1,0 +1,5 @@
+{"from": "DRAFT", "to": "SCRIPTING", "reason": "input and brand profile validated", "at": "2026-08-16T09:00:00+00:00"}
+{"from": "SCRIPTING", "to": "SCENE_PLANNING", "reason": "script schema passed", "at": "2026-08-16T09:00:00+00:00"}
+{"from": "SCENE_PLANNING", "to": "VOICE_GENERATING", "reason": "3 scenes, duration total 50000 ms", "at": "2026-08-16T09:00:00+00:00"}
+{"from": "VOICE_GENERATING", "to": "AWAITING_ASSETS", "reason": "master voice and timeline created", "at": "2026-08-16T09:42:00+00:00"}
+{"from": "AWAITING_ASSETS", "to": "READY_TO_RENDER", "reason": "all required assets validated", "at": "2026-08-16T09:42:00+00:00"}

@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-010",
+  "content_job_id": "ten-scene-demo",
+  "scene_index": 10,
+  "semantic_purpose": "conclusion",
+  "narration": "從下一支片的第一秒開始改，這週就看得到差別。",
+  "caption": "從下一支片的第一秒開始",
+  "duration_target_ms": 5000,
+  "visual_type": "title_card",
+  "visual_prompt": "深色底白字標題卡，置中排版",
+  "reference_assets": [],
+  "generation_required": false,
+  "provider": "local_title_card",
+  "provider_model": "",
+  "fallback_type": "none",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}

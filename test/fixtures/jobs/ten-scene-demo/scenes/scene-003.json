@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-003",
+  "content_job_id": "ten-scene-demo",
+  "scene_index": 3,
+  "semantic_purpose": "body",
+  "narration": "第二個問題是資訊密度太低，前十秒只講了一句話。",
+  "caption": "資訊密度太低",
+  "duration_target_ms": 5000,
+  "visual_type": "motion_graphic",
+  "visual_prompt": "資訊密度折線圖由低往高攀升的動態圖表",
+  "reference_assets": [],
+  "generation_required": false,
+  "provider": "local_motion_graphic",
+  "provider_model": "",
+  "fallback_type": "image_motion",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}

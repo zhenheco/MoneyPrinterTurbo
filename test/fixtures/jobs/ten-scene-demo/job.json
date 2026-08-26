@@ -1,0 +1,19 @@
+{
+  "content_job_id": "ten-scene-demo",
+  "tenant_id": "zhenhe",
+  "brand_id": "zhenhe-ai",
+  "creator_profile_id": "creator-001",
+  "topic": "短影音沒人看完的五個原因",
+  "language": "zh-TW",
+  "target_duration_sec": 50,
+  "image_mode": "assisted_qwen",
+  "video_mode": "manual_google_flow",
+  "max_generated_video_scenes": 3,
+  "publish_mode": "postiz_draft",
+  "budget_limit_usd": 5.0,
+  "estimated_cost_usd": 1.8,
+  "actual_cost_usd": 1.2,
+  "status": "READY_TO_RENDER",
+  "created_at": "2026-08-16T09:00:00+00:00",
+  "updated_at": "2026-08-16T09:42:00+00:00"
+}
