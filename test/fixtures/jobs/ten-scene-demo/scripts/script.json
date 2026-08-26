@@ -1,0 +1,24 @@
+{
+  "title": "短影音沒人看完的五個原因",
+  "target_audience": "自媒體經營者與品牌社群小編",
+  "core_message": "完播率是可以逐項拆解修好的，不是玄學。",
+  "hook": "你的短影音沒有人看完，問題不在演算法。",
+  "body": [
+    "第一秒沒有給觀眾一個非看不可的理由。",
+    "資訊密度太低，前十秒只講了一句話。",
+    "畫面跟旁白沒有對齊。",
+    "字幕太長，一行要看兩秒。",
+    "節奏平，整支片沒有一次轉折。"
+  ],
+  "conclusion": "從下一支片的第一秒開始改，這週就看得到差別。",
+  "cta": "留言告訴我你卡在哪一項。",
+  "claims": [
+    "前三秒的留存率決定後續推薦量"
+  ],
+  "sources": [
+    "https://example.com/short-form-retention-benchmarks"
+  ],
+  "risk_flags": [
+    "claim_needs_source_check"
+  ]
+}

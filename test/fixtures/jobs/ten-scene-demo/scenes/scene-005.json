@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-005",
+  "content_job_id": "ten-scene-demo",
+  "scene_index": 5,
+  "semantic_purpose": "body",
+  "narration": "第四個問題是字幕太長，一行要看兩秒。",
+  "caption": "字幕一行不超過十四字",
+  "duration_target_ms": 5000,
+  "visual_type": "screen_recording",
+  "visual_prompt": "字幕編輯器畫面錄影，逐行縮短字幕長度",
+  "reference_assets": [],
+  "generation_required": false,
+  "provider": "manual_screen_capture",
+  "provider_model": "",
+  "fallback_type": "image_motion",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}

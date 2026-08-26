@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-007",
+  "content_job_id": "ten-scene-demo",
+  "scene_index": 7,
+  "semantic_purpose": "body",
+  "narration": "把這五件事修好，完播率會先動，追蹤才會動。",
+  "caption": "完播率先動，追蹤才動",
+  "duration_target_ms": 5000,
+  "visual_type": "generated_video",
+  "visual_prompt": "兩條成長曲線先後上升的動態畫面",
+  "reference_assets": [],
+  "generation_required": true,
+  "provider": "manual_google_flow",
+  "provider_model": "",
+  "fallback_type": "image_motion",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}

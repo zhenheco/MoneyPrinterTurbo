@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-001",
+  "content_job_id": "ten-scene-demo",
+  "scene_index": 1,
+  "semantic_purpose": "hook",
+  "narration": "你的短影音沒有人看完，問題不在演算法。",
+  "caption": "問題不在演算法",
+  "duration_target_ms": 5000,
+  "visual_type": "generated_image",
+  "visual_prompt": "手機螢幕特寫，播放進度條停在前三秒",
+  "reference_assets": [],
+  "generation_required": true,
+  "provider": "qwen_code_plan",
+  "provider_model": "",
+  "fallback_type": "image_motion",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}
