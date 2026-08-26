@@ -54,8 +54,8 @@
 
 | Module | 職責（一句） | 公開介面（窄） | 新建/修改 |
 |---|---|---|---|
-| `app/models/content_job.py` | SPEC-001 §4 的 7 個資料契約，pydantic model，只管形狀驗證 | `ContentJob`、`Script`、`Scene`、`AssetRecord`、`ProviderEvent`、`UsageLedgerEntry`、`RenderManifest` | 新建 |
-| `app/services/jobs/store.py` | 一個 job 目錄的讀寫，JSON 單檔 + JSONL append，檔案即 truth | `JobStore(root)`、`.create(job)`、`.load(job_id)`、`.save(job)`、`.append_event(job_id, event)`、`.append_decision(job_id, record)` | 新建 |
+| `app/models/content_job.py` | SPEC-001 §4.2–§4.6 與 §8 的 7 個資料契約，pydantic model，只管形狀驗證 | `ContentJob`、`Script`、`Scene`、`AssetRecord`、`ProviderEvent`、`UsageLedgerEntry`、`RenderManifest` | 新建 |
+| `app/services/jobs/store.py` | 一個 job 目錄的讀寫，JSON 單檔 + JSONL append，檔案即 truth | `JobStore(root)`、`.create(record)`、`.load(job_id)`、`.save(job)`、`.replace(record)`、`.append_event(job_id, event)`、`.append_decision(job_id, record)` | 新建 |
 | `app/services/jobs/state_machine.py` | SPEC-001 §5 的合法轉移判定與錯誤分類，純函式無 I/O | `transition(job, to_status, reason)`、`is_legal(from_status, to_status)`、`classify_error(exc)` | 新建 |
 | `app/services/jobs/budget.py` | 呼叫 provider 前的預算閘門與呼叫後的帳本寫入 | `check_budget(job, estimated_cost_usd)`、`record_usage(store, job, event)`、`build_idempotency_key(...)` | 新建 |
 | `app/services/jobs/postiz.py` | Postiz 草稿建立，draft-only 強制 | `PostizPublisher(settings, session=None)`、`.create_draft(job, media_path, caption)` | 新建 |
@@ -67,7 +67,7 @@
 
 - **Schema**: 無資料庫。持久化 = job 目錄下的 JSON/JSONL 檔案（PLAN-001 Q1）。目錄結構固定為 `storage/jobs/<content_job_id>/`，內含 `job.json`、`scripts/script.json`、`scenes/scene-NNN.json`、`assets/assets.jsonl`、`provider_events.jsonl`、`usage_ledger.jsonl`、`decisions.jsonl`、`render_manifest.json`。不使用 SQLite——V0 是單機單使用者，檔案即 truth，V1 遷 Cloudflare 時只換 `JobStore` 實作。
 - **API contract**: 本次不新增 HTTP endpoint。所有模組以 Python 介面暴露，供後續 slice 的 CLI/API 層呼叫。
-- **資料契約**: 欄位形狀完全照 SPEC-001 §4.1–§4.6 的 JSON 範例，不增不減。`ContentJob.status` 為 §5.1 的 23 個狀態列舉。`actual_cost_usd` 允許 `"unknown"` 字串以外的數值型別，兩者都要能序列化回檔案。
+- **資料契約**: 欄位形狀完全照 SPEC-001 §4.2–§4.6 與 §8 的 JSON 範例，不增不減。`ContentJob.status` 為 §5.1 的 23 個狀態列舉。`actual_cost_usd` 允許 `"unknown"` 字串以外的數值型別，兩者都要能序列化回檔案。
 - **狀態機**: §5.2 轉移表逐條實作。`PUBLISHED` 沒有任何入邊——不是靠檢查擋，是轉移表裡根本沒有通往它的路徑。`RETRYABLE_FAILED`、`MANUAL_ACTION_REQUIRED`、`BUDGET_EXCEEDED`、`CANCELLED` 是可從多個來源狀態進入的橫切狀態，依 §5.2 最後四列實作。
 - **錯誤分類**: retryable = 網路錯誤、429、provider timeout。非 retryable = schema 錯誤、檔案格式錯誤、權限錯誤、預算超標、未授權素材（§5.3）。
 - **預算閘門**: 判定式完全照 §10：`actual_cost_usd + estimated_cost_usd > budget_limit_usd` 即轉 `BUDGET_EXCEEDED` 且不呼叫 provider。閘門必須在呼叫發生**之前**執行，測試要能證明 provider 真的沒被呼叫（用 mock 斷言呼叫次數為 0），而不只是斷言狀態變了。
@@ -96,7 +96,7 @@
 - **Blocked by**: None
 - **User stories**: #1, #2, #3, #4, #5
 - **Acceptance criteria**:
-  - [ ] `app/models/content_job.py` 定義 `ContentJob`、`Script`、`Scene`、`AssetRecord`、`ProviderEvent`、`UsageLedgerEntry`、`RenderManifest` 七個 pydantic model，欄位與 SPEC-001 §4.1–§4.6 的 JSON 範例逐欄一致
+  - [ ] `app/models/content_job.py` 定義 `ContentJob`、`Script`、`Scene`、`AssetRecord`、`ProviderEvent`、`UsageLedgerEntry`、`RenderManifest` 七個 pydantic model，欄位與 SPEC-001 §4.2–§4.6 與 §8 的 JSON 範例逐欄一致
   - [ ] `ContentJob.status` 為涵蓋 SPEC-001 §5.1 全部 23 個狀態的列舉，未知值被拒絕
   - [ ] 每個 model 至少有一個合法通過案例與一個缺欄位／型別錯誤的拒絕案例，錯誤訊息指出欄位名
   - [ ] `app/services/jobs/store.py` 的 `JobStore` 提供 create／load／save／append_event／append_decision，目錄結構為 `storage/jobs/<content_job_id>/` 且檔名照 Implementation Decisions
