@@ -77,3 +77,18 @@
 ## Q6 Phase 3（5 支 POC）是否納入本次 /go
 
 **不納入。** Phase 3 的本質是人工營運驗收（真實 Postiz instance、真人 consent 素材、Assisted 人工產圖/影片、實際成本與 15 分鐘人工介入量測），不是 autonomous code loop 能完成的工作；硬塞進 /go 只會在缺憑證/缺素材處卡死或誘發 agent 造假繞過。/go 的終點 = issue #11 全綠 + 一次本機 demo render。可以額外加一張 S 號 docs issue：產出 Phase 3 POC 操作 runbook（人工步驟 + 記錄表格），作為 /go 交付的最後一項。**翻盤條件**：使用者已備妥 Postiz credential 與已核准的 creator 素材，且願意人工在 AWAITING_ASSETS 時補件——那 Phase 3 第 1 支可以在 /ship 後以 attended 模式跑，但仍不該進 autonomous loop。
+
+## Q5 先行驗證實測結果（2026-08-26）
+
+**風險 1：Renderer 復用 — 已消除。** 實跑 spike（3 支 `storage/local_videos` 素材 + 現成 audio）：
+
+- `combine_videos()` 簽名不含 `VideoParams`，可由 RenderManifest 直接餵入；輸出 ffprobe = `h264 / 1080x1920 / 30fps`，16.3s 完成，正好是 SPEC §8 的目標規格。
+- 但 `combine_videos()` **只產 video stream，無音訊**；音訊／字幕／BGM 在 `generate_video()` 那層。
+- `generate_video()` 雖吃 `VideoParams`，實際只讀 6 個欄位：`font_name`、`font_size`、`stroke_width`、`subtitle_enabled`、`text_background_color`、`video_aspect` — 從 manifest 造最小 `VideoParams` 是 trivial 的。
+- **結論**：issue #9 = manifest → `combine_videos`（視覺）→ 由 manifest 建最小 `VideoParams` → `generate_video`（音訊＋字幕）→ ffprobe QA。Q2「平行新路徑、`task.py` 零修改」成立，不需自建渲染層。
+
+**風險 2：Script JSON 命中率 — 無法量測，且是新的執行 blocker。** `config.toml` 的 `llm_provider = "moonshot"` 但 `moonshot_api_key` 未設定，全檔沒有任何已設定的 LLM API key。
+
+- 影響範圍：issue #4（Script JSON 生成）、#5（Scene Planner）的驗收條件需要真實 LLM 呼叫；其 TDD 單元測試可用 mock 完成，但「從 topic 產出通過 schema 的 script.json」無法驗證。
+- 不影響：#1、#2、#3、#7、#9、#10 — 皆為純本機邏輯或 mock HTTP。
+- **需使用者提供**：任一 LLM provider 的 API key（寫入 `config.toml`，走 1Password `op://` reference）。
