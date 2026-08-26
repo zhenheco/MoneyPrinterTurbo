@@ -140,12 +140,23 @@ def check_budget(
     :class:`BudgetExceededError` leaves. The raised error carries the
     transitioned job on ``.job``.
 
+    When ``store`` is given the judgment is made against the job as it is on
+    disk, not against the object passed in: ``record_usage`` leaves that object
+    stale by contract, and a stale one must not be able to spend past the
+    limit. Without a ``store`` the function stays a pure predicate over ``job``.
+
     A job whose spend to date is ``"unknown"`` is refused: §10 forbids treating
     an unknown cost as zero, and an unprovable budget is not an affordable one.
     §5.2 gives some states no ``BUDGET_EXCEEDED`` edge; from those the call is
     still refused, the status simply stays where it is.
     """
     estimate = _amount(estimated_cost_usd, "estimated_cost_usd")
+    if store is not None:
+        # Judge what is on disk, not what the caller happens to be holding.
+        # ``record_usage`` writes the new spend and leaves the caller's object
+        # stale; a gate that trusts that object is bypassed by any loop that
+        # forgets to re-read.
+        job = store.load(job.content_job_id).job
     limit = _amount(job.budget_limit_usd, "budget_limit_usd")
     spent = (
         None if job.actual_cost_usd == UNKNOWN
@@ -255,18 +266,21 @@ def record_usage(
     ):
         return None
 
-    store.append_event(job.content_job_id, _scrubbed(event, actual))
+    scrubbed = _scrubbed(event, actual)
+    store.append_event(job.content_job_id, scrubbed)
+    # Every column the ledger copies comes off the scrubbed event, not the raw
+    # one: usage_ledger.jsonl is a job file like any other.
     entry = UsageLedgerEntry(
-        provider_event_id=event.provider_event_id,
-        content_job_id=event.content_job_id,
-        scene_id=event.scene_id,
-        provider=event.provider,
-        model=event.model,
-        idempotency_key=event.idempotency_key,
-        attempt_count=event.attempt_count,
-        estimated_cost_usd=event.estimated_cost_usd,
+        provider_event_id=scrubbed.provider_event_id,
+        content_job_id=scrubbed.content_job_id,
+        scene_id=scrubbed.scene_id,
+        provider=scrubbed.provider,
+        model=scrubbed.model,
+        idempotency_key=scrubbed.idempotency_key,
+        attempt_count=scrubbed.attempt_count,
+        estimated_cost_usd=scrubbed.estimated_cost_usd,
         actual_cost_usd=actual,
-        created_at=event.created_at,
+        created_at=scrubbed.created_at,
         estimated_cost_source=redact(estimated_cost_source),
         discarded_asset_ids=list(discarded_asset_ids),
         adopted_video_seconds=float(seconds),

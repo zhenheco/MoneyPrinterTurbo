@@ -414,11 +414,14 @@ class PostizPublisher:
             return
         reason = f"postiz draft created: {draft_id}"
         drafted = transition(job, JobStatus.POSTIZ_DRAFTED, reason=reason, now=timestamp)
-        self._store.save(drafted)
-        self._store.append_event(
-            job.content_job_id,
-            self._event(job, body, payload, timestamp, attempt, external_job_id=draft_id),
+        # Build the event that holds the draft id *before* the status is
+        # persisted: POSTIZ_DRAFTED on disk with no event naming the draft is
+        # the orphan this adapter exists to prevent.
+        event = self._event(
+            job, body, payload, timestamp, attempt, external_job_id=draft_id
         )
+        self._store.save(drafted)
+        self._store.append_event(job.content_job_id, event)
         self._store.append_decision(
             job.content_job_id, decision_record(job.status, drafted, reason)
         )

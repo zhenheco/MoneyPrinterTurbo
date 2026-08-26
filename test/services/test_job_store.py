@@ -142,6 +142,22 @@ class TestJobStoreRoundTrip:
         with pytest.raises(JobStoreError):
             store.replace(build_record(job_id="never-created"))
 
+    def test_a_colon_in_a_job_id_is_rejected_before_anything_is_written(
+        self, tmp_path
+    ):
+        """``build_idempotency_key`` splits on ``:``, so a job id carrying one
+        can never produce a key. Accepting it here only defers the ValueError
+        to the point where a provider call has already been made."""
+        store = JobStore(tmp_path)
+        job = ContentJob.model_validate(content_job_payload())
+        job.content_job_id = "tenant:job-1"
+
+        with pytest.raises(JobStoreError) as raised:
+            store.create(job)
+
+        assert "opaque token" in str(raised.value)
+        assert list(tmp_path.rglob("job.json")) == []
+
 
 class TestJobStoreAppend:
     def test_provider_events_read_back_in_write_order(self, tmp_path):

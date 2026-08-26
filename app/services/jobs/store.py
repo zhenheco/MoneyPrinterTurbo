@@ -45,8 +45,11 @@ from app.models.content_job import (
 )
 
 #: A job id is an opaque token: no path separators, no dots-only names, no NUL.
-#: Same shape as ``_ASSET_REF_PATTERN`` in ``app.services.creator_profile``.
-_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+#: ``:`` is excluded on top of that because it is the separator
+#: ``budget.build_idempotency_key`` splits on — a job id carrying one is
+#: unusable there, and accepting it here only moves the failure to after a
+#: provider call has already been made.
+_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 JOB_FILE = "job.json"
 SCRIPT_FILE = os.path.join("scripts", "script.json")

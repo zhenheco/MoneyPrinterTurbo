@@ -14,7 +14,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.models.content_job import JobStatus, ProviderEvent, UsageLedgerEntry
+from app.models.content_job import (
+    ContentJob,
+    JobStatus,
+    ProviderEvent,
+    UsageLedgerEntry,
+)
 from app.services.jobs.budget import (
     build_idempotency_key,
     check_budget,
@@ -25,6 +30,7 @@ from app.services.jobs.budget import (
 )
 from app.services.jobs.state_machine import BudgetExceededError
 from app.services.jobs.store import JobStore
+from test.services.test_content_job_models import content_job_payload
 
 FIXTURES_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "jobs"
 
@@ -447,6 +453,31 @@ class TestRecordUsage:
         assert SECRET not in stored.request_summary
         assert SECRET not in stored.response_summary
 
+    def test_a_credential_in_a_copied_column_never_lands_in_the_ledger(
+        self, tmp_path
+    ):
+        """The ledger copies six string columns straight off the event.
+
+        ``provider_events.jsonl`` is scrubbed; if the ledger takes its values
+        from the raw event instead, the same credential lands on disk one file
+        over. Deliberately a shape-recognised placeholder, not a real key.
+        """
+        leak = "sk-ledgerplaceholder0123456789"
+        store, record = load_demo(tmp_path)
+
+        record_usage(
+            store, record.job, provider_event("three-scene-demo", model=leak)
+        )
+
+        job_dir = tmp_path / "three-scene-demo"
+        assert leak not in (job_dir / "provider_events.jsonl").read_text(
+            encoding="utf-8"
+        )
+        assert leak not in (job_dir / "usage_ledger.jsonl").read_text(
+            encoding="utf-8"
+        )
+        assert leak not in store.load("three-scene-demo").usage_ledger[-1].model
+
     def test_an_event_for_another_job_is_rejected(self, tmp_path):
         store, record = load_demo(tmp_path)
 
@@ -602,6 +633,53 @@ class TestSilentRefusalsAreStillAudited:
         assert store.load("three-scene-demo").job.status == status
 
 
+class TestTheGateReadsDiskNotTheCallerObject:
+    """§10 must not depend on the caller re-reading the job every round.
+
+    ``record_usage`` writes the new spend to disk and leaves the in-memory job
+    stale by contract. A gate that trusts the object it was handed is bypassed
+    by any loop that forgets to re-read — a safety mechanism resting on caller
+    discipline is not a safety mechanism.
+    """
+
+    def test_a_stale_job_object_cannot_spend_past_the_limit(self, tmp_path):
+        store, record = load_demo(tmp_path)
+        stale = record.job  # deliberately never refreshed
+        limit = float(stale.budget_limit_usd)
+
+        calls = 0
+        with pytest.raises(BudgetExceededError):
+            for attempt in range(1, 60):
+                check_budget(stale, 0.5, store=store)
+                calls += 1
+                record_usage(
+                    store,
+                    store.load("three-scene-demo").job,
+                    provider_event(
+                        "three-scene-demo",
+                        provider_event_id=f"provider-event-8{attempt:02d}",
+                        idempotency_key=build_idempotency_key(
+                            "three-scene-demo", "scene-001", "video", attempt
+                        ),
+                        attempt_count=attempt,
+                        actual_cost_usd=0.5,
+                    ),
+                )
+
+        on_disk = float(store.load("three-scene-demo").job.actual_cost_usd)
+        assert on_disk <= limit
+        assert calls * 0.5 <= limit
+
+    def test_without_a_store_the_gate_still_judges_the_object_it_is_given(self):
+        job = ContentJob.model_validate(content_job_payload())
+        job.budget_limit_usd = 3.0
+        job.actual_cost_usd = 2.9
+
+        assert check_budget(job, 0.05) is job
+        with pytest.raises(BudgetExceededError):
+            check_budget(job, 0.5)
+
+
 class TestLedgerShapeIsConstant:
     """§4.6's ledger contract is fourteen columns, always.
 
@@ -661,9 +739,11 @@ class TestLedgerShapeIsConstant:
             .splitlines()
             if line.strip()
         ]
-        written = [json.loads(json.dumps(line)) for line in lines[-2:]]
-        assert [len(payload) for payload in written] == [14, 14]
-        assert written[0].keys() == written[1].keys()
+        # Every line, not just the two just written: the fixture rows are part
+        # of the same file and §10 says each one must be written in full.
+        assert len(lines) > 2
+        assert [len(payload) for payload in lines] == [14] * len(lines)
+        assert all(payload.keys() == lines[0].keys() for payload in lines)
 
 
 class TestCredentialShapesWithoutAKey:

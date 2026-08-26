@@ -382,6 +382,33 @@ class TestConfiguration:
 class TestEndToEnd:
     """Real JobStore, real fixture, real transitions — no mocks but the socket."""
 
+    def test_a_draft_id_that_cannot_be_recorded_does_not_leave_a_drafted_status(
+        self, tmp_path, monkeypatch
+    ):
+        """The status and the event that holds the draft id must not diverge.
+
+        POSTIZ_DRAFTED on disk with no provider event is the orphan this module
+        exists to prevent: the draft is live on Postiz and nothing local can
+        name it.
+        """
+        store = demo_store(tmp_path)
+        job = drafting_job(store)
+        media = media_file(tmp_path)
+        publisher = PostizPublisher(settings(), session=mock_session(), store=store)
+        monkeypatch.setattr(
+            PostizPublisher,
+            "_event",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no event")),
+        )
+
+        with pytest.raises(RuntimeError):
+            publisher.create_draft(job, media, "三個錯誤")
+
+        record = store.load(job.content_job_id)
+        drafted = record.job.status is JobStatus.POSTIZ_DRAFTED
+        recorded = [e for e in record.provider_events if e.provider == "postiz"]
+        assert not (drafted and not recorded)
+
     def test_successful_draft_lands_on_disk_without_losing_the_job(self, tmp_path):
         store = demo_store(tmp_path)
         job = drafting_job(store)
