@@ -786,3 +786,90 @@ class TestCredentialShapesWithoutAKey:
             encoding="utf-8"
         )
         assert SECRET not in on_disk
+
+
+class TestLocallyBuiltIdentifiersAreNotRedacted:
+    """A legal job id may contain a credential word, and must survive intact.
+
+    The store's id pattern allows ``session``/``token``/``sk-`` in a job id, so
+    the §4.6 idempotency key built from one is credential-*shaped* without
+    being a credential. Putting the locally built columns through
+    :func:`redact` turns the key on disk into ``<redacted>``, which never
+    equals the key of the event being replayed — §5.3's de-duplication stops
+    working and a resumed job is billed a second time.
+    """
+
+    JOB_IDS = ["session-2026-08-26", "token-2026-08-26", "sk-abcdefghijklmnop"]
+
+    def make_job(self, tmp_path, job_id):
+        payload = content_job_payload()
+        payload["content_job_id"] = job_id
+        store = JobStore(tmp_path)
+        store.create(ContentJob.model_validate(payload))
+        return store
+
+    @pytest.mark.parametrize("job_id", ["normal-2026-08-26", *JOB_IDS])
+    def test_replaying_a_call_is_still_de_duplicated(self, tmp_path, job_id):
+        store = self.make_job(tmp_path, job_id)
+        event = provider_event(job_id)
+
+        first = record_usage(store, store.load(job_id).job, event)
+        second = record_usage(store, store.load(job_id).job, event)
+
+        record = store.load(job_id)
+        assert first is not None
+        assert second is None
+        assert len(record.usage_ledger) == 1
+        assert record.usage_ledger[0].idempotency_key == event.idempotency_key
+        assert float(record.job.actual_cost_usd) == 0.12
+
+    @pytest.mark.parametrize("job_id", JOB_IDS)
+    def test_the_three_files_agree_on_the_join_keys(self, tmp_path, job_id):
+        store = self.make_job(tmp_path, job_id)
+        event = provider_event(job_id)
+
+        record_usage(store, store.load(job_id).job, event)
+
+        record = store.load(job_id)
+        entry = record.usage_ledger[-1]
+        stored_event = record.provider_events[-1]
+        assert record.job.content_job_id == job_id
+        assert entry.content_job_id == job_id
+        assert stored_event.content_job_id == job_id
+        assert entry.idempotency_key == event.idempotency_key
+        assert stored_event.idempotency_key == event.idempotency_key
+        assert entry.provider_event_id == event.provider_event_id
+        assert entry.scene_id == event.scene_id
+        assert entry.created_at == event.created_at
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "model",
+            "request_id",
+            "external_job_id",
+            "request_summary",
+            "response_summary",
+            "error_class",
+        ],
+    )
+    def test_a_provider_controlled_column_is_still_scrubbed(self, tmp_path, field):
+        """The f3890cf leak fix must not be weakened by the fix above.
+
+        The placeholder carries no word from ``_CREDENTIAL_WORDS``: it is
+        recognised by its own shape, so a test that passes here proves the
+        column was scrubbed rather than that the string happened to look like a
+        ``key: value`` pair.
+        """
+        leak = "sk-columnplaceholder0123456789"
+        store, record = load_demo(tmp_path)
+
+        record_usage(
+            store,
+            record.job,
+            provider_event("three-scene-demo", **{field: f"upstream 401: {leak}"}),
+        )
+
+        job_dir = tmp_path / "three-scene-demo"
+        for name in ("provider_events.jsonl", "usage_ledger.jsonl"):
+            assert leak not in (job_dir / name).read_text(encoding="utf-8")

@@ -26,12 +26,16 @@ which would refuse a call §10 allows against a ``0.30`` limit.
 
 Nothing here ever writes a credential. Summaries are produced by
 :func:`summarize`, which describes the shape of a payload and never a value, and
-*every* string field of an event reaching :func:`record_usage` — not only the
-two summary columns — is put through :func:`redact` before it is appended to a
-job file (§4.6: 完整憑證、API Key、Authorization header 與敏感回應不得寫入摘要
-欄位). :func:`redact` recognises a credential by its key, by the auth scheme in
-front of it, and by the shape of the token itself, because a provider quoting
-the key it rejected supplies none of the first two.
+every provider-controlled string of an event reaching :func:`record_usage` —
+not only the two summary columns — is put through :func:`redact` before it is
+appended to a job file (§4.6: 完整憑證、API Key、Authorization header 與敏感回應
+不得寫入摘要欄位). :func:`redact` recognises a credential by its key, by the auth
+scheme in front of it, and by the shape of the token itself, because a provider
+quoting the key it rejected supplies none of the first two. Locally built
+columns — ids, the idempotency key, timestamps, counts, costs — are never
+redacted: they are not provider text, and a job id may legally contain a
+credential word, so scrubbing them would corrupt the very keys §5.3 de-duplicates
+on.
 """
 
 from __future__ import annotations
@@ -92,6 +96,28 @@ _CREDENTIAL_PATTERNS = (
     re.compile(
         r"\b(?:gh[pousr]_|xox[abposr]-|AKIA|ASIA|glpat-|ya29\.)[A-Za-z0-9_.-]{10,}"
     ),
+)
+
+
+#: The §4.6 event columns whose text the provider controls, and only those.
+#: A provider echoes back what we sent it — the key it rejected shows up in an
+#: ``error_class`` or a ``request_id`` as readily as in a summary — so these are
+#: put through :func:`redact` before anything is written.
+#:
+#: The columns not listed here are built locally: ids, the idempotency key,
+#: timestamps, counts and costs. Redacting those corrupts them, and a job id
+#: may legally carry a credential word (``session-2026-08-26``), which would
+#: turn the ledger's ``idempotency_key`` into ``<redacted>`` and break the §5.3
+#: de-duplication that stops a resumed job being billed twice.
+_PROVIDER_CONTROLLED_FIELDS = frozenset(
+    {
+        "model",
+        "request_id",
+        "external_job_id",
+        "request_summary",
+        "response_summary",
+        "error_class",
+    }
 )
 
 
@@ -268,8 +294,10 @@ def record_usage(
 
     scrubbed = _scrubbed(event, actual)
     store.append_event(job.content_job_id, scrubbed)
-    # Every column the ledger copies comes off the scrubbed event, not the raw
-    # one: usage_ledger.jsonl is a job file like any other.
+    # The ledger copies from the scrubbed event, not the raw one:
+    # usage_ledger.jsonl is a job file like any other, so its provider-controlled
+    # columns carry the same redaction. The locally built columns are identical
+    # in both, which is what keeps the two files joinable.
     entry = UsageLedgerEntry(
         provider_event_id=scrubbed.provider_event_id,
         content_job_id=scrubbed.content_job_id,
@@ -295,16 +323,23 @@ def record_usage(
 
 
 def _scrubbed(event: ProviderEvent, actual: CostUsd) -> ProviderEvent:
-    """``event`` with every string it carries put through :func:`redact`.
+    """``event`` with every provider-controlled string put through :func:`redact`.
 
     Not just the two summary columns. A provider that answers with
     ``error_class="upstream 401: token sk-... rejected"`` writes the credential
     into ``provider_events.jsonl`` exactly as effectively as one that puts it in
     ``response_summary``, and ``request_id``/``external_job_id`` are echoed
     provider text too.
+
+    The locally built columns are left alone — see
+    :data:`_PROVIDER_CONTROLLED_FIELDS`. They are our own tokens, never provider
+    text, and redacting them would break the joins and the de-duplication that
+    are built on them.
     """
     scrubbed = {
-        name: redact(value) for name, value in event if isinstance(value, str)
+        name: redact(value)
+        for name, value in event
+        if isinstance(value, str) and name in _PROVIDER_CONTROLLED_FIELDS
     }
     scrubbed["actual_cost_usd"] = actual
     return event.model_copy(update=scrubbed)
