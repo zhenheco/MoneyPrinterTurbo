@@ -10,13 +10,13 @@ from uuid import uuid4
 from app.config import config
 from app.models.content_job import ContentJob, JobStatus, ProviderEvent, Script
 from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
-from app.services import llm
 from app.services.jobs.budget import (
     build_idempotency_key,
     check_budget,
     record_usage,
     summarize,
 )
+from app.services.jobs import llm_adapter
 from app.services.jobs.state_machine import (
     IllegalTransitionError,
     classify_error,
@@ -229,17 +229,10 @@ def generate_script(job: ContentJob, store: JobStore) -> Script:
         response = ""
         call_error = None
         try:
-            response = llm.generate_script(
-                video_subject=current_job.topic,
+            response = llm_adapter.generate_script(
+                topic=current_job.topic,
                 language=current_job.language,
-                paragraph_number=1,
-                video_script_prompt=repair_prompt,
-                custom_system_prompt=(
-                    "Return only one JSON object with exactly these fields: title, "
-                    "target_audience, core_message, hook, body, conclusion, cta, "
-                    "claims, sources, risk_flags. body, claims, sources, and risk_flags "
-                    "must be JSON arrays of strings."
-                ),
+                repair_prompt=repair_prompt,
                 app_config=runtime_app_config,
             )
         except Exception as exc:
