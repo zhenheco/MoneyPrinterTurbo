@@ -29,7 +29,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 | `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 
-測試基準（2026-08-28 實測）：**1392 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1403 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 （前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
@@ -38,7 +38,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1392 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1403 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -128,8 +128,11 @@ plan_scenes(job, store)            # 8~10 個 Scene + 匯入目錄 + generation_
 - **兩者都重讀 store**，不信任傳進來的 `ContentJob`。傳一個過期的物件不會重跑一個階段，會拿到 `ScenePlanError`。
 - **`plan_scenes` 完全不呼叫 provider、不動預算。** 輸出是 Script 與 job 上限的純函式，同一份 script 永遠規劃出同一組 scene —— 這是需求不是巧合：重跑若洗牌，人工已經照舊 manifest 生好的素材就對不上了。
 - **冪等但會補寫，而且「已有 scenes」不等於「規劃完成」。** `plan_scenes` 只在持久化的 scene 集合是**完整計畫**（數量在 8~10、`scene_index` 連續 1..N、job id 相符）時才短路；否則視為崩潰殘骸重新規劃。匯入目錄與 manifest 則每次都補齊缺的那一份。`JobStore.replace` 是一個 scene 一個檔案，崩在中間會留下前綴 —— 把前綴當成「已規劃」會產出少於 8 個 entry 的 manifest 並讓 job 永久卡住。三種缺失（部分 scene、缺目錄、缺 manifest）各有測試釘住。
-- **`generation_manifest.json` 與 `assets/scenes/<scene_id>/` 刻意不在 `JobRecord` 裡**，所以 `replace()` 永遠刪不到它們（那些目錄可能已經有人工放進去的檔案）。走 `store.write_generation_manifest()` / `store.scene_asset_dir()`，**不要**把它們塞進 `JobRecord`。
-- manifest 的 `import_dir` 是**相對於 job 目錄**的 POSIX 路徑（`assets/scenes/scene-001`）。不要改成絕對路徑，job 樹會被搬。
+- **`generation_manifest.json` 與 `scenes/<scene_id>/<kind>/` 刻意不在 `JobRecord` 裡**，所以 `replace()` 永遠刪不到它們（那些目錄可能已經有人工放進去的檔案）。走 `store.write_generation_manifest()` / `store.scene_media_dir()`，**不要**把它們塞進 `JobRecord`。
+- 匯入目錄是 **SPEC-001 §3.2 的形狀**：`scenes/{scene_id}/images/` 與 `scenes/{scene_id}/videos/`，依 `visual_type` 決定。PLAN-001 Q9 明文指名這個路徑。注意 `store.py` 其餘的目錄配置（扁平的 `scene-NNN.json`、沒有 `audit/`）**本來就跟 §3.2 不一致**，那是 issue #1 的既有偏差，#5 沒有擴大也沒有修它。
+- manifest 的 `import_dir` 是**相對於 job 目錄**的 POSIX 路徑（`scenes/scene-001/images`）。PLAN-001 Q9 原本寫「印出絕對路徑」，**已於 2026-08-28 改成相對路徑並在該檔記錄原因**：manifest 是會跟著 job 目錄搬的持久檔，絕對路徑一換機器就失效。要給人看的絕對路徑由印出的那一層自己接。
+- `store.scene_media_relative_dir()` 什麼都不建立，但它產生的字串會進 manifest，所以它跟 `scene_media_dir()` **做同一套 scene_id 與 kind 驗證**。新增呼叫端時不要繞過它自己拼字串。
+- **manifest 的 `created_at` 是「這份 manifest 何時被寫出」，不是決定性的。** 同一個 job 正常只會寫一次，但 manifest 被刪掉後重跑會補一份新的、帶新時間戳。scene 內容仍然完全決定性；不要拿整份 manifest 做 byte 比對當回歸測試，要比就比 `entries`。
 - `generated_video` 名額 = `min(job.max_generated_video_scenes, 3, body scene 數 // 3)`，取 narration 最長的 body scene，同長度時取 index 小的。**上限是天花板不是配額**，所以典型 V0 job 只會拿到 1~2 個 AI 影片。
 
 凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。另外，**這兩組 fixture 的 `scenes/` 是手寫的，不是 planner 產出的** —— 拿它們的 script 跑 `plan_scenes` 都會得到 8 個 scene，而 `ten-scene-demo` 的目錄裡是 10 個。不要把兩者當成同一回事。
@@ -162,7 +165,7 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 
 **#4 與 #5 之間那段斷點已補上**：`start_scene_planning()` 把 `SCRIPTING` 推進 `SCENE_PLANNING` 並寫 `decisions.jsonl`。**#5 與 #6 之間現在是同一種斷點**：`plan_scenes()` 結束後 job 停在 `SCENE_PLANNING`，沒有任何程式碼把它推進 `VOICE_GENERATING`（這條邊在轉移表裡合法）。#6 開工第一件事要補這一步 —— 照 `start_scene_planning` 的形狀寫（重讀 store、檢查前置文件存在、transition + save + append_decision）。
 
-**#8 需要的東西 #5 已經備好**：每個 scene 的匯入目錄（`assets/scenes/<scene_id>/`）與 `generation_manifest.json` 的 `expected_filename` / `accepted_mime_types`。#8 的驗證應該對照 manifest，不要另外定義一套檔名規則。
+**#8 需要的東西 #5 已經備好**：每個 scene 的匯入目錄（`scenes/{scene_id}/images/` 或 `videos/`，SPEC §3.2 形狀）與 `generation_manifest.json` 的 `import_dir` / `expected_filename` / `accepted_mime_types`。#8 的驗證應該對照 manifest，不要另外定義一套檔名或路徑規則。
 
 **LLM API key 不再是阻塞。** DeepSeek 已接線並實測可用：`llm_provider = "deepseek"`、`deepseek_base_url = "https://api.deepseek.com"`、`deepseek_model_name = "deepseek-v4-pro"`，key 從 `op://Dev/DEEPSEEK_API/credential` 取出寫進 `config.toml`（該檔在 `.gitignore` 第 2 行）。
 
@@ -189,7 +192,8 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 - `JobStore` 沒有 `DEFAULT_ROOT` 常數，`storage/jobs` 只出現在 docstring，實際路徑靠呼叫端自律。
 - `_utc_now()` 仍有三份逐字複製（`postiz.py`、`state_machine.py`、`pipeline.py`），格式一致但沒有測試釘住。issue #5 沒有再複製第四份：`state_machine` 的那份已改成公開的 `utc_now()`（`_utc_now` 留成別名），`scene_planner` 直接引用它。**另外兩份沒有動** —— 那是本次範圍外的重構。
 - **Scene Planner 是純詞法切分，沒有語意理解。** 場景邊界只看句號與逗號，`visual_type` 只看 `semantic_purpose` 與 narration 長度，`visual_prompt` 是樣板字串。產出的 prompt 可以直接拿去生圖，但**不會比腳本本身更聰明**；要更好的分鏡就得引入一次 LLM 呼叫，那會連帶需要預算閘門與 ProviderEvent（目前完全沒有）。
-- **太瘦的腳本會被從中間硬切，narration 可能斷在詞組中間。** 切分優先用句號、再用逗號；標點用完還湊不到 8 個場景時，最後手段是**從字數中點切**。實測 body 只有一段的腳本會產出 `第 1 個問` / `題是節奏太平，` 這種切法。這是刻意的取捨：`SPEC-001 §5.2` 沒有任何一條邊可以從 `SCENE_PLANNING` 走到失敗狀態，所以拒絕會讓 job **卡在 SCENE_PLANNING 且沒有任何操作訊號**；硬切至少是無損的（narration 拼回來等於原腳本，有測試釘住），人改稿重跑就能修好。**#6 / #7 要知道 narration 可能是半個詞組。** 只有整體字數少到連 8 段 ≥6 字都湊不出來時才會 `ScenePlanError`。
+- **太瘦的腳本會被從中間硬切，narration 可能斷在詞組中間。** 切分優先用句號、再用逗號；標點用完還湊不到 8 個場景時，最後手段是**從最接近中點的可用位置切**（兩半都要 ≥6 字且都要有非空白字元）。實測 body 只有一段的腳本會產出 `第 1 個問` / `題是節奏太平，` 這種切法。取捨理由是 PLAN-001 row 5 的驗收條件寫「8~10 scene 恆成立」，而硬切是無損的（narration 拼回來等於原腳本，有測試釘住），人改稿重跑就能修好。**#6 / #7 要知道 narration 可能是半個詞組。**
+- 真的短到連 8 段 ≥6 字都湊不出來時才 `ScenePlanError`，而且 **job 會被轉成 `MANUAL_ACTION_REQUIRED`**（`SCENE_PLANNING → MANUAL_ACTION_REQUIRED` 在 §5.2 是合法邊，`classify_error` 把 `ValueError` 歸為 non-retryable，形狀跟 `pipeline._persist_failed_status` 一致）。**這裡曾經寫錯過**：初版註解宣稱「§5.2 沒有從 SCENE_PLANNING 出去的失敗邊」，實測 `TRANSITIONS[SCENE_PLANNING]` 是 `BUDGET_EXCEEDED / CANCELLED / MANUAL_ACTION_REQUIRED / RETRYABLE_FAILED / VOICE_GENERATING`。要引用轉移表就去跑它，不要憑印象。
 - **`plan_scenes` 沒有 replan 路徑。** 已有 scenes 就短路，所以規劃完之後改 `script.json` 不會重新分鏡。issue #11 若需要「改稿後重跑」，要另外設計一條會明確標示並保護既有匯入素材的 replan。
 - 從中間切開的 scene，narration 會以「，」結尾（例如 `錯誤三：沒有驗收標準，`）。對 TTS 是合法的停頓，但**不要**在後續階段順手 strip 掉 —— 那會讓 narration 不再能拼回原腳本。
 - `budget.redact()` 只認得有標記或有固定前綴的憑證形狀，**裸 hex/UUID token 認不出來**。`postiz` 因此另外用自己知道的 token 值做明確比對（`_scrub`）。新增 provider adapter 時要沿用這個做法。

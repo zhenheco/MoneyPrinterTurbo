@@ -77,16 +77,17 @@ _VISUAL_PLAN: Dict[str, Tuple[str, str, bool]] = {
     "title_card": ("local_title_card", "none", False),
 }
 
-#: visual_type -> (expected file extension, accepted MIME types). Every §4.4
-#: visual type is listed even though V0 only plans three of them: an unlisted
-#: type must fail loudly rather than default to "image".
-_MEDIA_SHAPE: Dict[str, Tuple[str, List[str]]] = {
-    "generated_image": (".png", ["image/png", "image/jpeg"]),
-    "motion_graphic": (".png", ["image/png", "image/jpeg"]),
-    "title_card": (".png", ["image/png", "image/jpeg"]),
-    "generated_video": (".mp4", ["video/mp4"]),
-    "avatar": (".mp4", ["video/mp4"]),
-    "screen_recording": (".mp4", ["video/mp4"]),
+#: visual_type -> (SPEC-001 §3.2 per-scene directory, file extension, accepted
+#: MIME types). Every §4.4 visual type is listed even though V0 only plans
+#: three of them: an unlisted type must fail loudly rather than default to
+#: "image".
+_MEDIA_SHAPE: Dict[str, Tuple[str, str, List[str]]] = {
+    "generated_image": ("images", ".png", ["image/png", "image/jpeg"]),
+    "motion_graphic": ("images", ".png", ["image/png", "image/jpeg"]),
+    "title_card": ("images", ".png", ["image/png", "image/jpeg"]),
+    "generated_video": ("videos", ".mp4", ["video/mp4"]),
+    "avatar": ("videos", ".mp4", ["video/mp4"]),
+    "screen_recording": ("videos", ".mp4", ["video/mp4"]),
 }
 
 _MEDIA_LABELS = {
@@ -136,37 +137,46 @@ def _initial_units(script: Script) -> List[_Unit]:
     return units
 
 
+def _usable_cut(text: str, cut: int) -> bool:
+    """A cut is usable only if both halves are long enough and carry content.
+
+    The length floor alone is not enough: a run of whitespace is long, so a
+    purely positional cut can carve out a scene whose narration is blank.
+    """
+    head, tail = text[:cut], text[cut:]
+    return (
+        len(head) >= _MIN_UNIT_CHARS
+        and len(tail) >= _MIN_UNIT_CHARS
+        and bool(head.strip())
+        and bool(tail.strip())
+    )
+
+
 def _split_text(text: str) -> Optional[Tuple[str, str]]:
     """Cut ``text`` in two: at the soft break nearest its midpoint if there is
-    one, otherwise at the midpoint itself.
+    a usable one, otherwise at the usable position nearest the midpoint.
 
-    Ties go to the earlier break so the choice never depends on iteration order.
+    Ties go to the earlier cut so the choice never depends on iteration order.
 
-    The midpoint fallback is deliberate. A script whose sentences carry no
-    commas would otherwise dead-end here, and there is nowhere for the job to
-    go: §5.2 has no edge out of ``SCENE_PLANNING`` for a planning failure, so
-    it would sit in that state with no operator signal. A slightly awkward cut
-    is recoverable — a human edits the script and replans — a wedged job is
-    not. Only a script with too few characters to make ``MIN_SCENES`` readable
-    units is refused, and that refusal is reported.
+    The positional fallback is deliberate. PLAN-001 row 5 asks for 8–10 scenes
+    to hold for every script, and a script whose sentences carry no commas
+    would otherwise be refused even though it has plenty of content. A slightly
+    awkward cut is recoverable — a human edits the script and replans. A script
+    genuinely too short to make ``MIN_SCENES`` readable units still returns
+    ``None`` here, and :func:`plan_scenes` turns that into
+    ``MANUAL_ACTION_REQUIRED`` rather than leaving the job silent.
     """
     midpoint = len(text) / 2
-    best: Optional[Tuple[float, str, str]] = None
-    for index, character in enumerate(text):
-        if character not in _SOFT_BREAK:
-            continue
-        head, tail = text[: index + 1], text[index + 1 :]
-        if len(head) < _MIN_UNIT_CHARS or len(tail) < _MIN_UNIT_CHARS:
-            continue
-        distance = abs(len(head) - midpoint)
-        if best is None or distance < best[0]:
-            best = (distance, head, tail)
-    if best is not None:
-        return best[1], best[2]
-    if len(text) >= _MIN_UNIT_CHARS * 2:
-        cut = len(text) // 2
-        return text[:cut], text[cut:]
-    return None
+    soft = [
+        index + 1
+        for index, character in enumerate(text)
+        if character in _SOFT_BREAK and _usable_cut(text, index + 1)
+    ]
+    candidates = soft or [cut for cut in range(1, len(text)) if _usable_cut(text, cut)]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda cut: (abs(cut - midpoint), cut))
+    return text[:best], text[best:]
 
 
 def _merge_shortest_pair(units: List[_Unit]) -> bool:
@@ -223,19 +233,28 @@ def _segment(script: Script) -> List[_Unit]:
     return units
 
 
-def _is_complete_plan(job: ContentJob, scenes: Sequence[Scene]) -> bool:
-    """Is a persisted scene set a whole plan, or the debris of a crash?
+def _is_current_plan(record) -> bool:
+    """Is what is on disk this script's whole plan, or the debris of a crash?
 
     ``JobStore.replace`` writes one ``scene-NNN.json`` per scene, so a crash
-    part-way through leaves a prefix on disk. Loading that prefix and treating
-    it as "already planned" would publish a manifest with fewer than
-    ``MIN_SCENES`` entries and wedge the job there permanently.
+    part-way through leaves a prefix. Counting the files is not enough — an
+    8-file prefix of a planned 10-scene job is a perfectly plausible count —
+    so while the job is still in ``SCENE_PLANNING`` the plan is recomputed and
+    compared outright. That is only affordable because planning is a pure
+    function of the job and its script.
+
+    Past ``SCENE_PLANNING`` the plan is frozen: later stages own those scenes
+    and this function must not second-guess them.
     """
-    return (
-        MIN_SCENES <= len(scenes) <= MAX_SCENES
-        and all(scene.content_job_id == job.content_job_id for scene in scenes)
-        and [scene.scene_index for scene in scenes] == list(range(1, len(scenes) + 1))
-    )
+    scenes = record.scenes
+    if not scenes:
+        return False
+    if record.job.status is not JobStatus.SCENE_PLANNING or record.script is None:
+        return True
+    try:
+        return list(scenes) == _build_scenes(record.job, record.script)
+    except ScenePlanError:
+        return False
 
 
 # -- per-scene decisions ---------------------------------------------------
@@ -274,7 +293,14 @@ def _durations(units: Sequence[_Unit], target_duration_sec: int) -> List[int]:
 
 
 def _caption(narration: str) -> str:
-    text = narration.rstrip("".join(_SENTENCE_END) + "".join(_SOFT_BREAK))
+    """On-screen text for one scene: never blank, never longer than the cap.
+
+    Internal whitespace is collapsed first. Without that, narration carrying a
+    long run of spaces truncates to a caption made entirely of them, which is
+    not a caption at all.
+    """
+    collapsed = " ".join(narration.split())
+    text = collapsed.rstrip(_SENTENCE_END + _SOFT_BREAK).strip() or collapsed
     if len(text) <= _CAPTION_MAX_CHARS:
         return text
     window = text[:_CAPTION_MAX_CHARS]
@@ -356,7 +382,7 @@ def _build_manifest(
 ) -> GenerationManifest:
     entries = []
     for scene in scenes:
-        extension, mime_types = _MEDIA_SHAPE[scene.visual_type]
+        kind, extension, mime_types = _MEDIA_SHAPE[scene.visual_type]
         entries.append(
             GenerationManifestEntry(
                 scene_id=scene.scene_id,
@@ -369,7 +395,7 @@ def _build_manifest(
                 prompt=scene.visual_prompt,
                 narration=scene.narration,
                 duration_target_ms=scene.duration_target_ms,
-                import_dir=store.scene_asset_relative_dir(scene.scene_id),
+                import_dir=store.scene_media_relative_dir(scene.scene_id, kind),
                 expected_filename=f"{scene.scene_id}{extension}",
                 accepted_mime_types=list(mime_types),
             )
@@ -388,6 +414,28 @@ def _build_manifest(
 
 
 # -- public API ------------------------------------------------------------
+
+
+def _persist_unplannable(
+    job: ContentJob, store: JobStore, error: ScenePlanError
+) -> None:
+    """Park a job whose script cannot be planned, instead of leaving it silent.
+
+    §5.2 does allow ``SCENE_PLANNING -> MANUAL_ACTION_REQUIRED``, and
+    ``classify_error`` puts a ``ValueError`` in the non-retryable class, so
+    this is the same shape ``pipeline._persist_failed_status`` uses. Without
+    it the job would sit in ``SCENE_PLANNING`` looking healthy while every
+    replan raised.
+    """
+    current = store.load(job.content_job_id).job
+    if current.status is not JobStatus.SCENE_PLANNING:
+        return
+    reason = f"scene planning failed (non_retryable): {error}"
+    parked = transition(current, JobStatus.MANUAL_ACTION_REQUIRED, reason=reason)
+    store.save(parked)
+    store.append_decision(
+        job.content_job_id, decision_record(current.status, parked, reason)
+    )
 
 
 def start_scene_planning(job: ContentJob, store: JobStore) -> ContentJob:
@@ -427,21 +475,25 @@ def plan_scenes(job: ContentJob, store: JobStore) -> List[Scene]:
     job_id = job.content_job_id
     record = store.load(job_id)
     scenes = record.scenes
-    if not _is_complete_plan(record.job, scenes):
+    if not _is_current_plan(record):
         if record.job.status is not JobStatus.SCENE_PLANNING:
             raise ScenePlanError(
                 f"plan_scenes requires SCENE_PLANNING, got {record.job.status.value}"
             )
         if record.script is None:
             raise ScenePlanError("scene planning needs a persisted script")
-        scenes = _build_scenes(record.job, record.script)
+        try:
+            scenes = _build_scenes(record.job, record.script)
+        except ScenePlanError as error:
+            _persist_unplannable(record.job, store, error)
+            raise
         record.scenes = scenes
         store.replace(record)
 
     # Directories before the manifest: it must never name an import path that
     # is not there yet for whoever reads it. Both steps are create-only.
     for scene in scenes:
-        store.scene_asset_dir(job_id, scene.scene_id)
+        store.scene_media_dir(job_id, scene.scene_id, _MEDIA_SHAPE[scene.visual_type][0])
     if store.read_generation_manifest(job_id) is None:
         store.write_generation_manifest(
             job_id, _build_manifest(record.job, scenes, store)

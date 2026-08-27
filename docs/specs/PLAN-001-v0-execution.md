@@ -41,7 +41,7 @@
 | 6 | Video/Avatar Provider contract owner | DEFAULTABLE | V0 gate 保持關閉（manual import only，§6.6），不需要 contract 就能跑完 V0 |
 | 7 | 每月產量/長期成本上限 | DEFAULTABLE | 不影響 code；per-job `budget_limit_usd=3` 已固定 |
 | 8 | Gemini API billing 專案 | DEFAULTABLE | `gemini_api` 維持 `manual_action_required`；vertical slice 用 assisted/人工匯入，不需 automated video provider |
-| 9 | Qwen assisted 工作台目錄 | DEFAULTABLE | 即 SPEC §3.2 的 `scenes/{scene_id}/images/`，generation manifest 印出絕對路徑 |
+| 9 | Qwen assisted 工作台目錄 | DEFAULTABLE | 即 SPEC §3.2 的 `scenes/{scene_id}/images/`（影片素材為 `videos/`）。**2026-08-28 修正：`generation_manifest.json` 內存的是相對於 job 根目錄的 POSIX 路徑，不是絕對路徑。** 原本寫絕對路徑，但 manifest 是會被持久化並跟著 job 目錄搬動／分享的檔案，絕對路徑一換機器就失效；要給人看的絕對路徑由印出 manifest 的那一層自己接上 job 根目錄。issue #5 已照此實作 |
 | 10 | 失敗素材 retention | DEFAULTABLE | V0 全留（本機磁碟），AssetRecord 標 `abandoned`；不做清理 |
 | 11 | Upload-Post deprecated？ | DEFAULTABLE | adapter 層禁用：`publish_mode=postiz_draft` 時拒絕任何 auto-upload 路徑；不動上游 upload_post.py（merge 摩擦） |
 

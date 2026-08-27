@@ -18,7 +18,7 @@ from app.services.jobs.scene_planner import (
     plan_scenes,
     start_scene_planning,
 )
-from app.services.jobs.store import JobRecord, JobStore
+from app.services.jobs.store import JobRecord, JobStore, JobStoreError
 
 FIXTURES_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "jobs"
 
@@ -178,6 +178,34 @@ def test_a_punctuation_poor_script_is_still_cut_into_the_minimum(tmp_path):
     assert all(scene.narration.strip() for scene in scenes)
 
 
+def test_a_long_whitespace_run_never_becomes_a_blank_scene(tmp_path):
+    """A positional cut must not carve a scene out of a run of spaces.
+
+    Whitespace is long, so a purely length-based cut would happily produce a
+    narration with nothing in it — and a blank narration is a scene no voice
+    or subtitle stage can do anything with.
+    """
+    padded = Script(
+        title="留白測試",
+        target_audience="",
+        core_message="",
+        hook="前面二十四個字放在這裡當作開場用的內容" + " " * 96 + "後面二十四個字接著寫完這一段",
+        body=["中間這一段同樣夾著大量空白" + " " * 96 + "然後才把話講完整"],
+        conclusion="結論這一段也要夠長才切得動因此多寫一些字",
+        cta="行動呼籲這一段同樣需要足夠的長度",
+        claims=[],
+        sources=[],
+        risk_flags=[],
+    )
+
+    _, _, scenes = planned(tmp_path, padded)
+
+    assert MIN_SCENES <= len(scenes) <= MAX_SCENES
+    for scene in scenes:
+        assert scene.narration.strip(), scene.scene_id
+        assert scene.caption.strip(), scene.scene_id
+
+
 @pytest.mark.parametrize(
     "body_count,expected", [(5, 8), (6, 9), (7, 10), (8, 10), (11, 10)]
 )
@@ -208,7 +236,12 @@ def test_indivisible_script_that_cannot_reach_the_minimum_is_rejected(tmp_path):
     with pytest.raises(ScenePlanError, match="8"):
         plan_scenes(planning, store)
 
-    assert store.load(job.content_job_id).scenes == []
+    # Parked, not silently left in SCENE_PLANNING looking healthy.
+    reloaded = store.load(job.content_job_id)
+    assert reloaded.scenes == []
+    assert reloaded.job.status is JobStatus.MANUAL_ACTION_REQUIRED
+    assert reloaded.decisions[-1]["to"] == JobStatus.MANUAL_ACTION_REQUIRED.value
+    assert store.read_generation_manifest(job.content_job_id) is None
 
 
 # -- scene shape -----------------------------------------------------------
@@ -316,6 +349,31 @@ def test_each_scene_gets_its_own_import_directory_inside_the_job(tmp_path):
         seen.add(entry.import_dir)
 
 
+def test_import_directories_follow_the_spec_3_2_layout(tmp_path):
+    """SPEC-001 3.2 and PLAN-001 Q9 both name ``scenes/{scene_id}/images/``."""
+    store, job, scenes = planned(tmp_path, script_with_body(9))
+
+    manifest = store.read_generation_manifest(job.content_job_id)
+    by_id = {entry.scene_id: entry for entry in manifest.entries}
+    for scene in scenes:
+        expected_kind = "videos" if scene.visual_type == "generated_video" else "images"
+        assert by_id[scene.scene_id].import_dir == (
+            f"scenes/{scene.scene_id}/{expected_kind}"
+        )
+    assert any(entry.import_dir.endswith("/videos") for entry in manifest.entries)
+
+
+def test_store_refuses_an_escaping_scene_id_even_without_creating_anything(tmp_path):
+    """``scene_media_relative_dir`` creates nothing, so it is easy to leave
+    unvalidated — and it is the value that ends up in the manifest."""
+    store = JobStore(tmp_path)
+
+    with pytest.raises(JobStoreError):
+        store.scene_media_relative_dir("../../outside", "images")
+    with pytest.raises(JobStoreError):
+        store.scene_media_relative_dir("scene-001", "../secrets")
+
+
 def test_manifest_lists_every_scene_with_a_prompt_and_an_import_path(tmp_path):
     _, job, scenes = planned(tmp_path, script_with_body(5))
 
@@ -373,7 +431,9 @@ def test_replanning_is_idempotent_and_keeps_imported_material(tmp_path):
     assert again == scenes
     assert store.read_generation_manifest(job.content_job_id) == manifest_before
     assert imported.read_bytes() == b"human asset"
-    scene_dirs = sorted(path.name for path in (job_dir / "assets" / "scenes").iterdir())
+    scene_dirs = sorted(
+        path.name for path in (job_dir / "scenes").iterdir() if path.is_dir()
+    )
     assert scene_dirs == sorted(scene.scene_id for scene in scenes)
 
 
@@ -392,18 +452,21 @@ def test_rerun_restores_a_manifest_lost_between_the_two_writes(tmp_path):
     assert restored["generated_video_scene_count"] == before["generated_video_scene_count"]
 
 
-def test_rerun_rebuilds_a_scene_set_left_partial_by_a_crash(tmp_path):
+@pytest.mark.parametrize("kept", list(range(1, MAX_SCENES)))
+def test_rerun_rebuilds_a_scene_set_left_partial_by_a_crash(tmp_path, kept):
     """``JobStore.replace`` writes one file per scene; a crash leaves a prefix.
 
-    Treating that prefix as "already planned" would publish a manifest with
-    fewer than MIN_SCENES entries and wedge the job there for good.
+    Counting files cannot detect this: an 8-file prefix of a planned 10-scene
+    job is itself a plausible count. Every prefix length is exercised, up to
+    one short of a full ten-scene plan.
     """
-    store, job, scenes = planned(tmp_path, script_with_body(5))
+    store, job, scenes = planned(tmp_path, script_with_body(7))
+    assert len(scenes) == MAX_SCENES
     job_dir = tmp_path / job.content_job_id
-    for scene in scenes[3:]:
+    for scene in scenes[kept:]:
         (job_dir / "scenes" / f"scene-{scene.scene_index:03d}.json").unlink()
     (job_dir / "generation_manifest.json").unlink()
-    assert len(store.load(job.content_job_id).scenes) == 3
+    assert len(store.load(job.content_job_id).scenes) == kept
 
     again = plan_scenes(store.load(job.content_job_id).job, store)
 
@@ -415,12 +478,13 @@ def test_rerun_rebuilds_a_scene_set_left_partial_by_a_crash(tmp_path):
 
 def test_rerun_recreates_an_import_directory_that_was_removed(tmp_path):
     store, job, scenes = planned(tmp_path, script_with_body(5))
-    scene_dirs = tmp_path / job.content_job_id / "assets" / "scenes"
-    (scene_dirs / scenes[0].scene_id).rmdir()
+    manifest = store.read_generation_manifest(job.content_job_id)
+    removed = tmp_path / job.content_job_id / manifest.entries[0].import_dir
+    removed.rmdir()
 
     plan_scenes(store.load(job.content_job_id).job, store)
 
-    assert (scene_dirs / scenes[0].scene_id).is_dir()
+    assert removed.is_dir()
 
 
 def test_replanning_does_not_append_a_second_transition(tmp_path):

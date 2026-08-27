@@ -8,22 +8,30 @@ truth (PLAN-001 Q1). Layout::
         scripts/script.json
         scenes/scene-NNN.json
         assets/assets.jsonl
-        assets/scenes/<scene_id>/        <- where a human drops generated material
+        scenes/<scene_id>/images/        <- where a human drops generated stills
+        scenes/<scene_id>/videos/        <- and generated clips (SPEC-001 3.2)
         provider_events.jsonl
         usage_ledger.jsonl
         decisions.jsonl
         generation_manifest.json
         render_manifest.json
 
+The per-scene media directories are the SPEC-001 3.2 shape, which PLAN-001 Q9
+names explicitly. The rest of this layout predates them and already diverges
+from 3.2 (flat ``scene-NNN.json`` instead of ``scenes/<scene_id>/scene.json``,
+no ``audit/`` prefix); that divergence is issue #1's and is not widened here.
+A ``scenes/<scene_id>/`` directory cannot collide with a ``scene-NNN.json``
+document because every glob over that directory matches ``scene-*.json``.
+
 Single-file writes go through ``os.replace`` so a crash never leaves a
 half-written JSON document. The ``.jsonl`` files are append-only: neither
 ``save`` nor ``replace`` rewrites them.
 
-``generation_manifest.json`` and the ``assets/scenes/<scene_id>/`` directories
+``generation_manifest.json`` and the ``scenes/<scene_id>/<kind>/`` directories
 are scene-planner owned and deliberately *outside* the :class:`JobRecord`
 document set, so ``replace`` can never delete them — those directories may hold
 files a human placed there by hand. Use
-:meth:`JobStore.write_generation_manifest` and :meth:`JobStore.scene_asset_dir`.
+:meth:`JobStore.write_generation_manifest` and :meth:`JobStore.scene_media_dir`.
 
 Every path a read or write touches is resolved with ``os.path.realpath`` and
 proven to sit under the store root before it is opened, so a symlinked job
@@ -66,7 +74,10 @@ JOB_FILE = "job.json"
 SCRIPT_FILE = os.path.join("scripts", "script.json")
 SCENES_DIR = "scenes"
 ASSETS_FILE = os.path.join("assets", "assets.jsonl")
-SCENE_ASSETS_DIR = os.path.join("assets", "scenes")
+#: SPEC-001 3.2 names these four per-scene subdirectories. Only the ones a
+#: caller asks for are created; an unlisted name is refused rather than turned
+#: into an arbitrary directory under the job.
+SCENE_MEDIA_KINDS = frozenset({"images", "videos", "references", "qa"})
 PROVIDER_EVENTS_FILE = "provider_events.jsonl"
 USAGE_LEDGER_FILE = "usage_ledger.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
@@ -321,12 +332,8 @@ class JobStore:
         job_dir = self._job_dir(job_id)
         self._append_line(job_dir / DECISIONS_FILE, dict(record))
 
-    def scene_asset_dir(self, job_id: str, scene_id: str) -> Path:
-        """Create — idempotently — and return one scene's human-import directory.
-
-        Creation only: whatever a human already dropped in survives a replan,
-        which is why this lives outside the destructive :meth:`replace` path.
-        """
+    @staticmethod
+    def _require_scene_media(scene_id: str, kind: str) -> None:
         if (
             not isinstance(scene_id, str)
             or ".." in scene_id
@@ -335,21 +342,37 @@ class JobStore:
             raise JobStoreError(
                 f"scene_id must be an opaque token without path separators: {scene_id!r}"
             )
+        if kind not in SCENE_MEDIA_KINDS:
+            raise JobStoreError(
+                f"unknown scene media directory: {kind!r} "
+                f"(expected one of {sorted(SCENE_MEDIA_KINDS)})"
+            )
+
+    def scene_media_dir(self, job_id: str, scene_id: str, kind: str) -> Path:
+        """Create — idempotently — and return one scene's human-import directory.
+
+        Creation only: whatever a human already dropped in survives a replan,
+        which is why this lives outside the destructive :meth:`replace` path.
+        """
+        self._require_scene_media(scene_id, kind)
         job_dir = self._job_dir(job_id)
-        path = job_dir / SCENE_ASSETS_DIR / scene_id
+        path = job_dir / SCENES_DIR / scene_id / kind
         self._within_root(path)
         path.mkdir(parents=True, exist_ok=True)
-        # Re-checked after the mkdir: a symlinked ``assets/scenes`` would have
-        # been followed by ``parents=True`` and is only visible now.
+        # Re-checked after the mkdir: a symlinked ``scenes/<scene_id>`` would
+        # have been followed by ``parents=True`` and is only visible now.
         return self._within_root(path)
 
-    def scene_asset_relative_dir(self, scene_id: str) -> str:
-        """``scene_asset_dir``'s path as recorded in the generation manifest.
+    def scene_media_relative_dir(self, scene_id: str, kind: str) -> str:
+        """``scene_media_dir``'s path as recorded in the generation manifest.
 
         Relative to the job directory and always POSIX-separated, so a manifest
-        written on one machine still resolves on another.
+        written on one machine still resolves on another. Validated exactly
+        like :meth:`scene_media_dir`: a caller must not be able to mint an
+        escaping path here just because nothing is created.
         """
-        return f"{Path(SCENE_ASSETS_DIR).as_posix()}/{scene_id}"
+        self._require_scene_media(scene_id, kind)
+        return f"{Path(SCENES_DIR).as_posix()}/{scene_id}/{kind}"
 
     def write_generation_manifest(
         self, job_id: str, manifest: GenerationManifest
