@@ -284,6 +284,9 @@ def test_narration_reassembles_into_the_original_script_in_order(
     """Splitting and merging must move text around, never lose or reorder it.
 
     Body 1 exercises splitting, 5 exercises neither, 11 exercises merging.
+    The guarantee is exact for scripts whose fields carry no leading, trailing
+    or inter-sentence whitespace; see the normalization test below for what
+    happens when they do.
     """
     script = script_with_body(body_count)
     _, _, scenes = planned(tmp_path, script)
@@ -291,6 +294,31 @@ def test_narration_reassembles_into_the_original_script_in_order(
     assert "".join(scene.narration for scene in scenes) == "".join(
         [script.hook, *script.body, script.conclusion, script.cta]
     )
+
+
+def test_boundary_whitespace_is_normalized_away_not_carried_into_narration(tmp_path):
+    """Sentence boundaries are trimmed, so reassembly is exact modulo them.
+
+    That normalization is deliberate — it is what stops a whitespace run from
+    becoming its own scene — but it means the reassembly guarantee above holds
+    on trimmed content, not byte for byte on padded input.
+    """
+    padded = script_with_body(5)
+    spaced = padded.model_copy(
+        update={
+            "hook": f"   {padded.hook}   ",
+            "cta": f"\t{padded.cta}\n",
+        }
+    )
+
+    _, _, scenes = planned(tmp_path, spaced)
+
+    joined = "".join(scene.narration for scene in scenes)
+    assert joined == "".join(
+        [padded.hook, *padded.body, padded.conclusion, padded.cta]
+    )
+    assert not joined.startswith(" ")
+    assert not joined.endswith(("\n", "\t", " "))
 
 
 # -- the generated_video ceiling ------------------------------------------
@@ -485,6 +513,55 @@ def test_rerun_recreates_an_import_directory_that_was_removed(tmp_path):
     plan_scenes(store.load(job.content_job_id).job, store)
 
     assert removed.is_dir()
+
+
+def test_an_edited_script_replans_and_republishes_the_manifest(tmp_path):
+    """The documented recovery for a bad plan is "edit the script and replan".
+
+    Rebuilding the scenes while keeping the old manifest would hand the
+    operator a document that no longer describes what is on disk.
+    """
+    store, job, first = planned(tmp_path, script_with_body(5))
+    before = store.read_generation_manifest(job.content_job_id)
+
+    record = store.load(job.content_job_id)
+    record.script = script_with_body(9)
+    store.replace(record)
+
+    second = plan_scenes(store.load(job.content_job_id).job, store)
+    after = store.read_generation_manifest(job.content_job_id)
+
+    assert second != first
+    assert [entry.scene_id for entry in after.entries] == [
+        scene.scene_id for scene in second
+    ]
+    assert [entry.prompt for entry in after.entries] != [
+        entry.prompt for entry in before.entries
+    ]
+    assert after.generated_video_scene_count == len(
+        [scene for scene in second if scene.visual_type == "generated_video"]
+    )
+
+
+def test_a_damaged_frozen_plan_is_refused_instead_of_republished(tmp_path):
+    """Past SCENE_PLANNING the plan is frozen, so it cannot be rebuilt.
+
+    Accepting whatever survives would publish a manifest with one entry in it.
+    """
+    store, job, scenes = planned(tmp_path, script_with_body(5))
+    job_dir = tmp_path / job.content_job_id
+    for scene in scenes[1:]:
+        (job_dir / "scenes" / f"scene-{scene.scene_index:03d}.json").unlink()
+    (job_dir / "generation_manifest.json").unlink()
+    moved_on = store.load(job.content_job_id).job.model_copy(
+        update={"status": JobStatus.VOICE_GENERATING}
+    )
+    store.save(moved_on)
+
+    with pytest.raises(ScenePlanError, match="SCENE_PLANNING"):
+        plan_scenes(moved_on, store)
+
+    assert store.read_generation_manifest(job.content_job_id) is None
 
 
 def test_replanning_does_not_append_a_second_transition(tmp_path):

@@ -233,6 +233,16 @@ def _segment(script: Script) -> List[_Unit]:
     return units
 
 
+def _is_structurally_complete(job: ContentJob, scenes: Sequence[Scene]) -> bool:
+    """The invariants a whole plan satisfies, without recomputing it."""
+    return (
+        MIN_SCENES <= len(scenes) <= MAX_SCENES
+        and all(scene.content_job_id == job.content_job_id for scene in scenes)
+        and [scene.scene_index for scene in scenes] == list(range(1, len(scenes) + 1))
+        and len({scene.scene_id for scene in scenes}) == len(scenes)
+    )
+
+
 def _is_current_plan(record) -> bool:
     """Is what is on disk this script's whole plan, or the debris of a crash?
 
@@ -243,18 +253,21 @@ def _is_current_plan(record) -> bool:
     compared outright. That is only affordable because planning is a pure
     function of the job and its script.
 
-    Past ``SCENE_PLANNING`` the plan is frozen: later stages own those scenes
-    and this function must not second-guess them.
+    Past ``SCENE_PLANNING`` the plan is frozen and must not be recomputed:
+    later stages own those scenes, and a script edited afterwards must not
+    silently reshuffle them. The structural invariants are still checked
+    though, so a damaged set is refused rather than published as a manifest
+    with one entry in it.
     """
     scenes = record.scenes
     if not scenes:
         return False
-    if record.job.status is not JobStatus.SCENE_PLANNING or record.script is None:
-        return True
-    try:
-        return list(scenes) == _build_scenes(record.job, record.script)
-    except ScenePlanError:
-        return False
+    if record.job.status is JobStatus.SCENE_PLANNING and record.script is not None:
+        try:
+            return list(scenes) == _build_scenes(record.job, record.script)
+        except ScenePlanError:
+            return False
+    return _is_structurally_complete(record.job, scenes)
 
 
 # -- per-scene decisions ---------------------------------------------------
@@ -475,6 +488,7 @@ def plan_scenes(job: ContentJob, store: JobStore) -> List[Scene]:
     job_id = job.content_job_id
     record = store.load(job_id)
     scenes = record.scenes
+    replanned = False
     if not _is_current_plan(record):
         if record.job.status is not JobStatus.SCENE_PLANNING:
             raise ScenePlanError(
@@ -489,12 +503,17 @@ def plan_scenes(job: ContentJob, store: JobStore) -> List[Scene]:
             raise
         record.scenes = scenes
         store.replace(record)
+        replanned = True
 
     # Directories before the manifest: it must never name an import path that
     # is not there yet for whoever reads it. Both steps are create-only.
     for scene in scenes:
         store.scene_media_dir(job_id, scene.scene_id, _MEDIA_SHAPE[scene.visual_type][0])
-    if store.read_generation_manifest(job_id) is None:
+    # A rebuilt plan always republishes. An edited script changes prompts,
+    # durations, the video count and which scene wants a video — keeping the
+    # old manifest would leave the operator working from a document that no
+    # longer describes the scenes on disk.
+    if replanned or store.read_generation_manifest(job_id) is None:
         store.write_generation_manifest(
             job_id, _build_manifest(record.job, scenes, store)
         )
