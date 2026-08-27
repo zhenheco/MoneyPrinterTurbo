@@ -161,10 +161,24 @@ def _sentences(text: str) -> List[str]:
 
 
 def _initial_units(script: Script) -> List[_Unit]:
-    """The script in narrative order, one unit per sentence."""
-    segments: List[Tuple[str, str]] = [("hook", script.hook)]
-    segments += [("body", item) for item in script.body]
-    segments += [("conclusion", script.conclusion), ("cta", script.cta)]
+    """The script in narrative order, one unit per sentence.
+
+    Each field is redacted *whole*, before it is cut up. Redacting the pieces
+    afterwards is not equivalent: ``api_key=sk-x，<token>`` splits at the comma
+    into a half that still looks like a ``key=value`` pair and a half that is
+    just a bare token, and only the first half would be caught. Sanitizing the
+    source removes the credential once, everywhere it would otherwise flow —
+    narration, caption and prompt alike.
+
+    For a script with no credential in it ``redact`` is the identity, so this
+    costs nothing and the narration still reassembles into the script exactly.
+    """
+    segments: List[Tuple[str, str]] = [("hook", redact(script.hook))]
+    segments += [("body", redact(item)) for item in script.body]
+    segments += [
+        ("conclusion", redact(script.conclusion)),
+        ("cta", redact(script.cta)),
+    ]
     units: List[_Unit] = []
     for purpose, text in segments:
         units += [_Unit(purpose, sentence) for sentence in _sentences(text)]

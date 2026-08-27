@@ -644,27 +644,51 @@ def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
         update={
             "title": "部署手冊 api_key=sk-live-abcdefghijklmnop 請照做",
             "core_message": "設定 Authorization: Bearer abcdefghijklmnopqrst 之後就能跑。",
+            # The comma matters: it is a split point, so redacting the pieces
+            # after segmentation would leave the bare token in its own scene.
+            "conclusion": "最後把 api_key=sk-live-zyxwvutsrqponm，貼進設定檔就完成了。",
         }
+    )
+    secrets = (
+        "sk-live-abcdefghijklmnop",
+        "abcdefghijklmnopqrst",
+        "sk-live-zyxwvutsrqponm",
     )
 
     store, job, scenes = planned(tmp_path, leaky)
     manifest = store.read_generation_manifest(job.content_job_id)
 
-    for scene in scenes:
-        assert "sk-live-abcdefghijklmnop" not in scene.visual_prompt
-        assert "abcdefghijklmnopqrst" not in scene.visual_prompt
-    for entry in manifest.entries:
-        assert "sk-live-abcdefghijklmnop" not in entry.prompt
-        assert "abcdefghijklmnopqrst" not in entry.prompt
+    for secret in secrets:
+        for scene in scenes:
+            assert secret not in scene.visual_prompt, scene.scene_id
+            assert secret not in scene.narration, scene.scene_id
+            assert secret not in scene.caption, scene.scene_id
+        for entry in manifest.entries:
+            assert secret not in entry.prompt, entry.scene_id
+            assert secret not in entry.narration, entry.scene_id
 
-    # Identifiers and narration are NOT redacted: doing that to identifiers is
-    # what broke idempotency keys once, and narration is what the voice stage
-    # has to speak.
+    # Identifiers are NOT redacted: doing that is what broke idempotency keys
+    # once and caused double billing.
     assert [scene.scene_id for scene in scenes] == [
         f"scene-{index:03d}" for index in range(1, len(scenes) + 1)
     ]
-    assert all("<redacted>" not in scene.narration for scene in scenes)
     assert all("<redacted>" not in entry.import_dir for entry in manifest.entries)
+
+
+def test_a_clean_script_is_untouched_by_the_credential_filter(tmp_path):
+    """Redaction must be the identity for ordinary content.
+
+    Otherwise the lossless-narration guarantee would quietly depend on the
+    filter never firing, which is not something a test elsewhere would catch.
+    """
+    script = script_with_body(5)
+    _, _, scenes = planned(tmp_path, script)
+
+    assert all("<redacted>" not in scene.narration for scene in scenes)
+    assert all("<redacted>" not in scene.visual_prompt for scene in scenes)
+    assert "".join(scene.narration for scene in scenes) == "".join(
+        [script.hook, *script.body, script.conclusion, script.cta]
+    )
 
 
 def test_a_parked_job_is_not_handed_its_previous_plan(tmp_path):
