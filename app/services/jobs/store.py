@@ -8,14 +8,22 @@ truth (PLAN-001 Q1). Layout::
         scripts/script.json
         scenes/scene-NNN.json
         assets/assets.jsonl
+        assets/scenes/<scene_id>/        <- where a human drops generated material
         provider_events.jsonl
         usage_ledger.jsonl
         decisions.jsonl
+        generation_manifest.json
         render_manifest.json
 
 Single-file writes go through ``os.replace`` so a crash never leaves a
 half-written JSON document. The ``.jsonl`` files are append-only: neither
 ``save`` nor ``replace`` rewrites them.
+
+``generation_manifest.json`` and the ``assets/scenes/<scene_id>/`` directories
+are scene-planner owned and deliberately *outside* the :class:`JobRecord`
+document set, so ``replace`` can never delete them — those directories may hold
+files a human placed there by hand. Use
+:meth:`JobStore.write_generation_manifest` and :meth:`JobStore.scene_asset_dir`.
 
 Every path a read or write touches is resolved with ``os.path.realpath`` and
 proven to sit under the store root before it is opened, so a symlinked job
@@ -37,6 +45,7 @@ from typing import Any, List, Optional, Union
 from app.models.content_job import (
     AssetRecord,
     ContentJob,
+    GenerationManifest,
     ProviderEvent,
     RenderManifest,
     Scene,
@@ -48,16 +57,20 @@ from app.models.content_job import (
 #: ``:`` is excluded on top of that because it is the separator
 #: ``budget.build_idempotency_key`` splits on — a job id carrying one is
 #: unusable there, and accepting it here only moves the failure to after a
-#: provider call has already been made.
-_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+#: provider call has already been made. Scene ids become directory names under
+#: ``assets/scenes/`` and are held to the same rule.
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_JOB_ID_PATTERN = _ID_PATTERN
 
 JOB_FILE = "job.json"
 SCRIPT_FILE = os.path.join("scripts", "script.json")
 SCENES_DIR = "scenes"
 ASSETS_FILE = os.path.join("assets", "assets.jsonl")
+SCENE_ASSETS_DIR = os.path.join("assets", "scenes")
 PROVIDER_EVENTS_FILE = "provider_events.jsonl"
 USAGE_LEDGER_FILE = "usage_ledger.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
+GENERATION_MANIFEST_FILE = "generation_manifest.json"
 RENDER_MANIFEST_FILE = "render_manifest.json"
 
 # append_event routes by record type; each contract owns exactly one file.
@@ -307,6 +320,67 @@ class JobStore:
             raise JobStoreError("decision record must be a mapping")
         job_dir = self._job_dir(job_id)
         self._append_line(job_dir / DECISIONS_FILE, dict(record))
+
+    def scene_asset_dir(self, job_id: str, scene_id: str) -> Path:
+        """Create — idempotently — and return one scene's human-import directory.
+
+        Creation only: whatever a human already dropped in survives a replan,
+        which is why this lives outside the destructive :meth:`replace` path.
+        """
+        if (
+            not isinstance(scene_id, str)
+            or ".." in scene_id
+            or not _ID_PATTERN.fullmatch(scene_id)
+        ):
+            raise JobStoreError(
+                f"scene_id must be an opaque token without path separators: {scene_id!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        path = job_dir / SCENE_ASSETS_DIR / scene_id
+        self._within_root(path)
+        path.mkdir(parents=True, exist_ok=True)
+        # Re-checked after the mkdir: a symlinked ``assets/scenes`` would have
+        # been followed by ``parents=True`` and is only visible now.
+        return self._within_root(path)
+
+    def scene_asset_relative_dir(self, scene_id: str) -> str:
+        """``scene_asset_dir``'s path as recorded in the generation manifest.
+
+        Relative to the job directory and always POSIX-separated, so a manifest
+        written on one machine still resolves on another.
+        """
+        return f"{Path(SCENE_ASSETS_DIR).as_posix()}/{scene_id}"
+
+    def write_generation_manifest(
+        self, job_id: str, manifest: GenerationManifest
+    ) -> Path:
+        """Write the §6.1 generation manifest for ``job_id``."""
+        if not isinstance(manifest, GenerationManifest):
+            raise JobStoreError(
+                "write_generation_manifest takes a GenerationManifest, "
+                f"got {type(manifest).__name__}"
+            )
+        if manifest.content_job_id != job_id:
+            raise JobStoreError(
+                f"generation manifest belongs to {manifest.content_job_id!r}, "
+                f"not to {job_id!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        path = job_dir / GENERATION_MANIFEST_FILE
+        self._write_guarded(path, _dump(manifest))
+        return path
+
+    def read_generation_manifest(self, job_id: str) -> Optional[GenerationManifest]:
+        """Read the §6.1 generation manifest, or ``None`` when none was written."""
+        job_dir = self._job_dir(job_id)
+        path = self._within_root(job_dir / GENERATION_MANIFEST_FILE)
+        if not path.is_file():
+            return None
+        return self._validate(
+            GenerationManifest,
+            _read_json(path, GENERATION_MANIFEST_FILE),
+            GENERATION_MANIFEST_FILE,
+        )
 
     # -- internals --------------------------------------------------------
 

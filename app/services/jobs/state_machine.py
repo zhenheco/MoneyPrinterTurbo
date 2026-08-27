@@ -258,5 +258,10 @@ def _status_code(exc: BaseException):
     return None
 
 
-def _utc_now() -> str:
+def utc_now() -> str:
+    """The timestamp format every job document and decision record uses."""
     return datetime.now(timezone.utc).isoformat()
+
+
+#: Kept so the existing private call sites in this module keep working.
+_utc_now = utc_now

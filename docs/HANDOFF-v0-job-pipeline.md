@@ -1,46 +1,48 @@
 # Handoff：V0 Job Pipeline
 
-> 最後更新 2026-08-27。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
->
-> 前一版 handoff 只存在於某台機器的本地 commit（`b5a411a`），從未推上 origin。這一版是 repo 內第一份可信的 handoff。
+> 最後更新 2026-08-28。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
 
 ## 1. 現在在哪
 
-`origin/main` = `80bcd17`。V0 job pipeline 的相關合併：
+V0 job pipeline 的相關合併：
 
 | PR | commit | 內容 |
 |---|---|---|
 | #5 | `407d78d` | PLAN-001 issue #1 #2 #3 #10：資料契約、狀態機、預算閘門、Postiz draft adapter |
 | #6 | `864963e` | issue #4：建立 Job + Script JSON 生成 |
 | #7 | `ac8b15b` | 修復 issue #4 交付時未被發現的破口（見 §3，**這一條最重要**） |
+| #8 | `084aa0d` | 上一版 handoff |
+| 本次 | — | issue #5：Scene Planner + Generation Manifest |
 
-PLAN-001 的 11 張 issue **做完 5 張**：#1 #2 #3 #4 #10。
+PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 
 全部落在平行路徑 `app/services/jobs/`，**`app/services/task.py` 至今零修改**（上游熱區，侵入式修改會讓每次 merge upstream 都衝突 —— 見 PLAN-001 Q2）。
 
 | 模組 | 職責 |
 |---|---|
-| `app/models/content_job.py` | SPEC-001 §4.2–§4.6、§8 的 7 個 pydantic 契約 + `JobStatus`（23 狀態） |
-| `app/services/jobs/store.py` | job 目錄檔案儲存，JSON 單檔 + JSONL append-only |
+| `app/models/content_job.py` | SPEC-001 §4.2–§4.6、§8 的 pydantic 契約 + `JobStatus`（23 狀態） + §6.1 `GenerationManifest` |
+| `app/services/jobs/store.py` | job 目錄檔案儲存，JSON 單檔 + JSONL append-only + scene 匯入目錄 |
 | `app/services/jobs/state_machine.py` | §5.2 的轉移表 + §5.3 錯誤分類，純函式無 I/O |
 | `app/services/jobs/budget.py` | §10 預算閘門 + 成本帳本 |
 | `app/services/jobs/postiz.py` | §6.4 draft-only 發布器 |
 | `app/services/jobs/pipeline.py` | issue #4：`create_job` / `start_scripting` / `generate_script` |
 | `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
+| `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 
-測試基準（2026-08-27 於 `80bcd17` 實測）：**1344 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1388 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+（前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
 
 ```bash
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
-git log origin/main -1 --oneline                      # 應為 80bcd17 或更新
-.venv/bin/python -m pytest test -q                    # 1344 passed / 11 skipped
+git log origin/main -1 --oneline
+.venv/bin/python -m pytest test -q                    # 1388 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
-**注意本地 checkout 可能落後或分歧。** 2026-08-27 當下，開發機的本地 `main` 落後 origin 4 個 commit，且帶著一個未推送的舊 handoff commit。先 `git status` 與 `git log origin/main..HEAD` 確認，再決定 pull 或 reset。
+**注意本地 checkout 可能落後或分歧。** 這在這台開發機上已經發生過兩次：本地 `main` 落後 origin 好幾個 commit，且帶著一個從未推上去的舊 handoff commit（`b5a411a`）。先 `git status` 與 `git log origin/main..HEAD` 確認，再決定 pull 或 reset。
 
 CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13 + Windows smoke。**Windows smoke 是逐檔列舉測試，目前沒有納入任何 job pipeline 測試**，而 `store.py` 正是全 repo 最吃 Windows 路徑語義的檔案。CI 也**沒有型別檢查**。
 
@@ -116,7 +118,21 @@ record_usage(store, job, event, ...)               # 寫 ledger + event，並回
 
 `generate_script()` 的重試語意：attempt 編號**從既有 ledger 推導**（解析 idempotency key），跨呼叫合計上限 2 次；已有 `script` 時直接回傳（冪等短路）；狀態守衛**重讀 store**，不看記憶體裡的 job 物件。
 
-凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。
+Scene Planner（issue #5）：
+
+```python
+start_scene_planning(job, store)   # SCRIPTING -> SCENE_PLANNING，寫 decisions.jsonl
+plan_scenes(job, store)            # 8~10 個 Scene + 匯入目錄 + generation_manifest.json
+```
+
+- **兩者都重讀 store**，不信任傳進來的 `ContentJob`。傳一個過期的物件不會重跑一個階段，會拿到 `ScenePlanError`。
+- **`plan_scenes` 完全不呼叫 provider、不動預算。** 輸出是 Script 與 job 上限的純函式，同一份 script 永遠規劃出同一組 scene —— 這是需求不是巧合：重跑若洗牌，人工已經照舊 manifest 生好的素材就對不上了。
+- **冪等但會補寫。** 已有 scenes 就不重規劃，但匯入目錄與 manifest 每次都會補齊缺的那一份 —— scene 文件、目錄、manifest 是三次獨立寫入，崩在中間時重跑必須能收尾（有測試釘住）。
+- **`generation_manifest.json` 與 `assets/scenes/<scene_id>/` 刻意不在 `JobRecord` 裡**，所以 `replace()` 永遠刪不到它們（那些目錄可能已經有人工放進去的檔案）。走 `store.write_generation_manifest()` / `store.scene_asset_dir()`，**不要**把它們塞進 `JobRecord`。
+- manifest 的 `import_dir` 是**相對於 job 目錄**的 POSIX 路徑（`assets/scenes/scene-001`）。不要改成絕對路徑，job 樹會被搬。
+- `generated_video` 名額 = `min(job.max_generated_video_scenes, 3, body scene 數 // 3)`，取 narration 最長的 body scene，同長度時取 index 小的。**上限是天花板不是配額**，所以典型 V0 job 只會拿到 1~2 個 AI 影片。
+
+凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。另外，**這兩組 fixture 的 `scenes/` 是手寫的，不是 planner 產出的** —— 拿它們的 script 跑 `plan_scenes` 都會得到 8 個 scene，而 `ten-scene-demo` 的目錄裡是 10 個。不要把兩者當成同一回事。
 
 ## 5. 需要人拍板的規格缺口（擋 issue #11）
 
@@ -137,15 +153,16 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 
 | # | 標題 | 大小 | 卡在哪 |
 |---|---|---|---|
-| 5 | Scene Planner + Generation Manifest | M | **無阻塞，可立刻開工** |
-| 6 | Master Voice + 時間軸 | M | 依賴 #5 |
+| 6 | Master Voice + 時間軸 | M | **無阻塞，可立刻開工**（#5 已完成） |
 | 7 | 字幕生成 | S | 依賴 #6 |
-| 8 | Asset Import + Creator Profile preflight | L | 依賴 #5 |
+| 8 | Asset Import + Creator Profile preflight | L | **無阻塞**（#5 已完成） |
 | 9 | Render Manifest + Renderer + ffprobe QA | L | 依賴 #6 #7 #8 |
 | 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部 + §5 的規格缺口 |
 | — | Phase 3 POC 操作 runbook（PLAN-001 Q6 提到的 S 號 docs issue） | S | 無阻塞，尚未建立 |
 
-**#4 與 #5 之間有一段沒人做**：`generate_script()` 成功後 job 停在 `SCRIPTING`，沒有任何程式碼把它推進 `SCENE_PLANNING`（這條邊在轉移表裡是合法的）。#5 開工第一件事要補這一步。
+**#4 與 #5 之間那段斷點已補上**：`start_scene_planning()` 把 `SCRIPTING` 推進 `SCENE_PLANNING` 並寫 `decisions.jsonl`。**#5 與 #6 之間現在是同一種斷點**：`plan_scenes()` 結束後 job 停在 `SCENE_PLANNING`，沒有任何程式碼把它推進 `VOICE_GENERATING`（這條邊在轉移表裡合法）。#6 開工第一件事要補這一步 —— 照 `start_scene_planning` 的形狀寫（重讀 store、檢查前置文件存在、transition + save + append_decision）。
+
+**#8 需要的東西 #5 已經備好**：每個 scene 的匯入目錄（`assets/scenes/<scene_id>/`）與 `generation_manifest.json` 的 `expected_filename` / `accepted_mime_types`。#8 的驗證應該對照 manifest，不要另外定義一套檔名規則。
 
 **LLM API key 不再是阻塞。** DeepSeek 已接線並實測可用：`llm_provider = "deepseek"`、`deepseek_base_url = "https://api.deepseek.com"`、`deepseek_model_name = "deepseek-v4-pro"`，key 從 `op://Dev/DEEPSEEK_API/credential` 取出寫進 `config.toml`（該檔在 `.gitignore` 第 2 行）。
 
@@ -170,12 +187,16 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 - **`ContentJob.content_job_id` 與 `Scene.scene_id` 本身無格式驗證** —— 驗證只在 `JobStore` 層。繞過 store 直接建構含冒號的物件交給 `create_draft`，`build_idempotency_key` 會在 HTTP **送出之後**才拋錯，產生 orphan draft。V0 無此呼叫路徑，但**接 CLI/API 層時很容易踩到**。
 - `JobStore.create()` 非原子：mkdir 成功後若寫檔失敗，會留下沒有 `job.json` 的半成品目錄，重試 `create()` 會被「already exists」擋死。issue #4 之後它進了活的呼叫路徑。
 - `JobStore` 沒有 `DEFAULT_ROOT` 常數，`storage/jobs` 只出現在 docstring，實際路徑靠呼叫端自律。
-- `_utc_now()` 現在有三份逐字複製（`postiz.py`、`state_machine.py`、`pipeline.py`），格式一致但沒有測試釘住。
+- `_utc_now()` 仍有三份逐字複製（`postiz.py`、`state_machine.py`、`pipeline.py`），格式一致但沒有測試釘住。issue #5 沒有再複製第四份：`state_machine` 的那份已改成公開的 `utc_now()`（`_utc_now` 留成別名），`scene_planner` 直接引用它。**另外兩份沒有動** —— 那是本次範圍外的重構。
+- **Scene Planner 是純詞法切分，沒有語意理解。** 場景邊界只看句號與逗號，`visual_type` 只看 `semantic_purpose` 與 narration 長度，`visual_prompt` 是樣板字串。產出的 prompt 可以直接拿去生圖，但**不會比腳本本身更聰明**；要更好的分鏡就得引入一次 LLM 呼叫，那會連帶需要預算閘門與 ProviderEvent（目前完全沒有）。
+- **body 只有一段的腳本會被 `ScenePlanError` 拒絕。** 這種腳本在標點邊界上最多只能切出 7 個場景，湊到 8 就得切進詞組中間，產出的 narration 是 voice 階段沒法用的碎片。這是刻意選擇：寧可拒絕，不要降級。有測試釘住。
+- **`plan_scenes` 沒有 replan 路徑。** 已有 scenes 就短路，所以規劃完之後改 `script.json` 不會重新分鏡。issue #11 若需要「改稿後重跑」，要另外設計一條會明確標示並保護既有匯入素材的 replan。
+- 從中間切開的 scene，narration 會以「，」結尾（例如 `錯誤三：沒有驗收標準，`）。對 TTS 是合法的停頓，但**不要**在後續階段順手 strip 掉 —— 那會讓 narration 不再能拼回原腳本。
 - `budget.redact()` 只認得有標記或有固定前綴的憑證形狀，**裸 hex/UUID token 認不出來**。`postiz` 因此另外用自己知道的 token 值做明確比對（`_scrub`）。新增 provider adapter 時要沿用這個做法。
 - 去重是「先讀後寫」，兩個並行程序可各自通過檢查。V0 單程序檔案儲存，無此情境。
 - **SPEC §12 的 Contract 測試分類是零**，§6 的 Provider Protocol 一行都沒有，而且沒有任何 issue 擁有它。
 - **§12 要求 6 組 golden fixture，只存在 2 組**：缺 `missing-asset`、`video-provider-timeout`、`budget-exceeded`、`render-failure`。
-- **SPEC §13 Phase 0 的核准 gate 從未關閉**：PRD-001 仍標「Draft，等待使用者核准」、SPEC-001 仍標「Draft，等待 PRD-001 核准」、ADR-001 仍是 Proposed，但 5 張 issue 的 code 已經合併進 main。
+- **SPEC §13 Phase 0 的核准 gate 從未關閉**：PRD-001 仍標「Draft，等待使用者核准」、SPEC-001 仍標「Draft，等待 PRD-001 核准」、ADR-001 仍是 Proposed，但 6 張 issue 的 code 已經合併進 main。
 
 ## 8. 環境
 
@@ -196,3 +217,5 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 3. **mutation testing 證明不了「少了一整步」。** 預算閘門在這個 repo 已經以**四種不同形式**失效過：估算恆為 0、沒有人回寫已花費金額、重試時 idempotency key 碰撞導致不計費、上游函式內部自己重試 5 次。每一次單元測試都全綠。**寫驗收測試時要問「這條路真的有人走完嗎」，不只是「這個函式對嗎」。**
 
 4. **合理的論證不等於正確的論證。** 修憑證外洩時採用了「統一讓所有欄位過 redact」這個聽起來更一致的做法，結果把合法 job id 的 idempotency key 吃掉、去重失效、重複計費。**聽起來合理的說法要實測，尤其是它推翻了某個 per-case 處理的時候。**
+
+5. **「冪等」的短路條件必須涵蓋每一次寫入，不能只看第一次。** issue #5 的 `plan_scenes` 一開始用「已有 scenes 就直接回傳」當冪等，但它其實做三次獨立寫入（scene 文件 → 匯入目錄 → manifest）。崩在第一次之後，重跑會因為 scenes 已存在而短路，manifest 永遠補不回來 —— 而且所有測試都會綠，因為沒有一條測試模擬過中途崩潰。**多步驟寫入的冪等，要用「缺什麼補什麼」而不是「做過就跳過」，並且要有一條測試真的把中間產物刪掉再重跑。**
