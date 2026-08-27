@@ -642,7 +642,9 @@ def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
     """
     leaky = script_with_body(5).model_copy(
         update={
-            "title": "部署手冊 api_key=sk-live-abcdefghijklmnop 請照做",
+            # The ASCII comma again: redact() stops there, so substituting its
+            # output would leave the bare token in the title of every prompt.
+            "title": "部署手冊 api_key=sk-x,qponmlkjihgfedcba 請照做",
             "core_message": "設定 Authorization: Bearer abcdefghijklmnopqrst 之後就能跑。",
             # The ASCII comma matters: it is both a split point and a boundary
             # the credential pattern stops at, so redacting the pieces after
@@ -651,7 +653,7 @@ def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
         }
     )
     secrets = (
-        "sk-live-abcdefghijklmnop",
+        "qponmlkjihgfedcba",
         "abcdefghijklmnopqrst",
     )
 

@@ -401,6 +401,15 @@ def _caption(narration: str) -> str:
     return window
 
 
+def _prompt_fragment(text: str) -> str:
+    """A whole Script field, or the withheld marker if the filter reacted.
+
+    Never the filter's *output*: see :func:`_visual_prompt` for why a partially
+    redacted string is not a safe substitute.
+    """
+    return _WITHHELD if redact(text) != text else _phrase(text)
+
+
 def _phrase(text: str) -> str:
     """Trim a script field's own terminal punctuation before quoting it.
 
@@ -420,13 +429,16 @@ def _visual_prompt(
     is model output built from a user-supplied topic, so it is exactly the kind
     of text that can carry one by accident.
 
-    Two different treatments, because the fields differ. ``title`` and
-    ``core_message`` are quoted whole, so redacting them is exact. The
-    narration line is a *slice* of a field, so it is withheld entirely when its
-    source field looked suspect — a slice can carry a credential the filter can
-    no longer see once a delimiter has cut it in half.
+    One rule for every script-derived fragment: if the credential filter reacts
+    to the source field *at all*, that field does not appear in the prompt.
 
-    What is never redacted: ``scene_id`` and the fixed labels (locally built
+    Substituting the filter's own output is not good enough, and that is the
+    whole point. Measured, ``redact("api_key=sk-x,abcdefghijklmnopqrst")``
+    returns ``<redacted>,abcdefghijklmnopqrst`` — the pattern stops at the
+    ASCII comma and the bare token rides along. Withholding the field is what
+    makes the prompt safe regardless of how well the filter matched.
+
+    What is never filtered: ``scene_id`` and the fixed labels (locally built
     identifiers — running those through a credential filter is what once turned
     an idempotency key into ``<redacted>`` and double-billed), and
     ``Scene.narration`` itself, which the voice stage has to speak.
@@ -447,8 +459,8 @@ def _visual_prompt(
     line = _WITHHELD if unit.suspect else f"「{_phrase(unit.text)}」"
     return (
         f"為短影音場景 {scene_id}（{purpose}）產生{media}。"
-        f"影片主題：{redact(_phrase(script.title))}。"
-        f"核心訊息：{redact(_phrase(script.core_message))}。"
+        f"影片主題：{_prompt_fragment(script.title)}。"
+        f"核心訊息：{_prompt_fragment(script.core_message)}。"
         f"本段旁白：{line}。{requirement}"
     )
 
