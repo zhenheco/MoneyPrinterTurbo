@@ -60,6 +60,20 @@ _SOFT_BREAK = "，、；;,"
 #: degrades into single-word scenes.
 _MIN_UNIT_CHARS = 6
 
+#: Every stage at or after scene planning has finished. A plan persisted while
+#: the job sits in one of these is frozen — later stages already built on those
+#: exact scenes — so it is checked structurally instead of recomputed. The four
+#: stages that come *before* a plan exists are excluded: scenes found there are
+#: not something this stage may adopt.
+_FROZEN_PLAN_STATUSES = frozenset(JobStatus) - frozenset(
+    {
+        JobStatus.DRAFT,
+        JobStatus.RESEARCHING,
+        JobStatus.SCRIPTING,
+        JobStatus.SCENE_PLANNING,
+    }
+)
+
 _CAPTION_MAX_CHARS = 20
 
 _PURPOSE_LABELS = {
@@ -81,10 +95,15 @@ _VISUAL_PLAN: Dict[str, Tuple[str, str, bool]] = {
 #: MIME types). Every §4.4 visual type is listed even though V0 only plans
 #: three of them: an unlisted type must fail loudly rather than default to
 #: "image".
+#:
+#: One MIME type per extension, on purpose. §7 validates the file by MIME
+#: sniffing *and* extension, so advertising ``image/jpeg`` next to a required
+#: ``.png`` filename would tell the operator to produce something the import
+#: step then rejects. Widening this means widening the filename rule with it.
 _MEDIA_SHAPE: Dict[str, Tuple[str, str, List[str]]] = {
-    "generated_image": ("images", ".png", ["image/png", "image/jpeg"]),
-    "motion_graphic": ("images", ".png", ["image/png", "image/jpeg"]),
-    "title_card": ("images", ".png", ["image/png", "image/jpeg"]),
+    "generated_image": ("images", ".png", ["image/png"]),
+    "motion_graphic": ("images", ".png", ["image/png"]),
+    "title_card": ("images", ".png", ["image/png"]),
     "generated_video": ("videos", ".mp4", ["video/mp4"]),
     "avatar": ("videos", ".mp4", ["video/mp4"]),
     "screen_recording": ("videos", ".mp4", ["video/mp4"]),
@@ -258,15 +277,24 @@ def _is_current_plan(record) -> bool:
     silently reshuffle them. The structural invariants are still checked
     though, so a damaged set is refused rather than published as a manifest
     with one entry in it.
+
+    Before ``SCENE_PLANNING`` nothing is accepted at all. Scenes sitting on
+    disk while the job is still in ``DRAFT`` or ``SCRIPTING`` are not a plan
+    this stage may publish, and letting them through here would walk straight
+    past :func:`plan_scenes`'s status guard.
     """
     scenes = record.scenes
     if not scenes:
         return False
-    if record.job.status is JobStatus.SCENE_PLANNING and record.script is not None:
+    if record.job.status is JobStatus.SCENE_PLANNING:
+        if record.script is None:
+            return False
         try:
             return list(scenes) == _build_scenes(record.job, record.script)
         except ScenePlanError:
             return False
+    if record.job.status not in _FROZEN_PLAN_STATUSES:
+        return False
     return _is_structurally_complete(record.job, scenes)
 
 
@@ -488,7 +516,6 @@ def plan_scenes(job: ContentJob, store: JobStore) -> List[Scene]:
     job_id = job.content_job_id
     record = store.load(job_id)
     scenes = record.scenes
-    replanned = False
     if not _is_current_plan(record):
         if record.job.status is not JobStatus.SCENE_PLANNING:
             raise ScenePlanError(
@@ -503,18 +530,21 @@ def plan_scenes(job: ContentJob, store: JobStore) -> List[Scene]:
             raise
         record.scenes = scenes
         store.replace(record)
-        replanned = True
 
     # Directories before the manifest: it must never name an import path that
     # is not there yet for whoever reads it. Both steps are create-only.
     for scene in scenes:
         store.scene_media_dir(job_id, scene.scene_id, _MEDIA_SHAPE[scene.visual_type][0])
-    # A rebuilt plan always republishes. An edited script changes prompts,
-    # durations, the video count and which scene wants a video — keeping the
-    # old manifest would leave the operator working from a document that no
-    # longer describes the scenes on disk.
-    if replanned or store.read_generation_manifest(job_id) is None:
-        store.write_generation_manifest(
-            job_id, _build_manifest(record.job, scenes, store)
-        )
+    # The manifest is compared against the scenes rather than against "did I
+    # rebuild on this call". A crash between the scene write and the manifest
+    # write leaves a manifest that describes the *previous* plan, and the next
+    # call sees scenes that now match the script and would think there was
+    # nothing to do. Only the timestamp is exempt: it records when the manifest
+    # was written, not what it says.
+    expected = _build_manifest(record.job, scenes, store)
+    published = store.read_generation_manifest(job_id)
+    if published is None or published.model_dump(
+        exclude={"created_at"}
+    ) != expected.model_dump(exclude={"created_at"}):
+        store.write_generation_manifest(job_id, expected)
     return scenes

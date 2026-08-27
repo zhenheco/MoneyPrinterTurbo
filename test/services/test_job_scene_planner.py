@@ -77,6 +77,28 @@ def seeded_store(tmp_path, script: Script, **job_overrides):
     return store, job
 
 
+def assert_manifest_describes(manifest, scenes) -> None:
+    """Every manifest entry must agree with its scene on every shared field."""
+    assert [entry.scene_id for entry in manifest.entries] == [
+        scene.scene_id for scene in scenes
+    ]
+    assert manifest.generated_video_scene_count == len(
+        [scene for scene in scenes if scene.visual_type == "generated_video"]
+    )
+    for entry, scene in zip(manifest.entries, scenes):
+        assert entry.scene_index == scene.scene_index
+        assert entry.semantic_purpose == scene.semantic_purpose
+        assert entry.visual_type == scene.visual_type
+        assert entry.fallback_type == scene.fallback_type
+        assert entry.generation_required == scene.generation_required
+        assert entry.provider == scene.provider
+        assert entry.prompt == scene.visual_prompt
+        assert entry.narration == scene.narration
+        assert entry.duration_target_ms == scene.duration_target_ms
+        assert entry.expected_filename.startswith(scene.scene_id + ".")
+        assert entry.import_dir.startswith(f"scenes/{scene.scene_id}/")
+
+
 def planned(tmp_path, script: Script, **job_overrides):
     store, job = seeded_store(tmp_path, script, **job_overrides)
     planning = start_scene_planning(job, store)
@@ -153,11 +175,11 @@ def test_any_body_length_still_plans_into_the_allowed_range(tmp_path, body_count
 
 
 def test_a_punctuation_poor_script_is_still_cut_into_the_minimum(tmp_path):
-    """No commas to cut on must not wedge the job.
+    """No commas to cut on must still reach the 8-10 contract.
 
-    §5.2 has no edge out of SCENE_PLANNING for a planning failure, so refusing
-    here would strand the job with no operator signal. A midpoint cut is the
-    lesser evil and stays inside the 8-10 contract.
+    PLAN-001 row 5 asks for 8-10 scenes to hold for every script, and a script
+    with plenty of content but no commas has no business being refused. A cut
+    at the nearest usable position is the lesser evil.
     """
     unpunctuated = Script(
         title="完播率拆解",
@@ -532,15 +554,8 @@ def test_an_edited_script_replans_and_republishes_the_manifest(tmp_path):
     after = store.read_generation_manifest(job.content_job_id)
 
     assert second != first
-    assert [entry.scene_id for entry in after.entries] == [
-        scene.scene_id for scene in second
-    ]
-    assert [entry.prompt for entry in after.entries] != [
-        entry.prompt for entry in before.entries
-    ]
-    assert after.generated_video_scene_count == len(
-        [scene for scene in second if scene.visual_type == "generated_video"]
-    )
+    assert after != before
+    assert_manifest_describes(after, second)
 
 
 def test_a_damaged_frozen_plan_is_refused_instead_of_republished(tmp_path):
@@ -560,6 +575,61 @@ def test_a_damaged_frozen_plan_is_refused_instead_of_republished(tmp_path):
 
     with pytest.raises(ScenePlanError, match="SCENE_PLANNING"):
         plan_scenes(moved_on, store)
+
+    assert store.read_generation_manifest(job.content_job_id) is None
+
+
+def test_rerun_replaces_a_manifest_left_describing_the_previous_plan(tmp_path):
+    """A crash after the scene write leaves a manifest for the *old* plan.
+
+    On the next run the scenes already match the script, so "did I rebuild on
+    this call" is the wrong question — the manifest has to be compared with
+    the scenes themselves.
+    """
+    store, job, first = planned(tmp_path, script_with_body(5))
+    stale = store.read_generation_manifest(job.content_job_id)
+
+    record = store.load(job.content_job_id)
+    record.script = script_with_body(9)
+    record.scenes = []
+    store.replace(record)
+    # Scenes rewritten for the new script, manifest still the old one.
+    store.write_generation_manifest(job.content_job_id, stale)
+    second = plan_scenes(store.load(job.content_job_id).job, store)
+
+    assert second != first
+    assert_manifest_describes(store.read_generation_manifest(job.content_job_id), second)
+
+
+@pytest.mark.parametrize("status", [JobStatus.DRAFT, JobStatus.SCRIPTING])
+def test_scenes_found_before_the_stage_are_not_adopted(tmp_path, status):
+    """Scenes on disk while the job is still pre-planning are not a plan.
+
+    Accepting them structurally would walk straight past the status guard and
+    publish a manifest for a job that never entered SCENE_PLANNING.
+    """
+    store, job, scenes = planned(tmp_path, script_with_body(5))
+    (tmp_path / job.content_job_id / "generation_manifest.json").unlink()
+    rewound = store.load(job.content_job_id).job.model_copy(
+        update={"status": status}
+    )
+    store.save(rewound)
+
+    with pytest.raises(ScenePlanError, match="SCENE_PLANNING"):
+        plan_scenes(rewound, store)
+
+    assert store.read_generation_manifest(job.content_job_id) is None
+
+
+def test_planning_without_a_persisted_script_is_refused(tmp_path):
+    store, job, scenes = planned(tmp_path, script_with_body(5))
+    (tmp_path / job.content_job_id / "generation_manifest.json").unlink()
+    record = store.load(job.content_job_id)
+    record.script = None
+    store.replace(record)
+
+    with pytest.raises(ScenePlanError, match="script"):
+        plan_scenes(store.load(job.content_job_id).job, store)
 
     assert store.read_generation_manifest(job.content_job_id) is None
 

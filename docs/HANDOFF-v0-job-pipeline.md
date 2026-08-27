@@ -29,7 +29,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 | `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 
-測試基準（2026-08-28 實測）：**1406 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1410 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 （前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
@@ -38,7 +38,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1406 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1410 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -127,7 +127,8 @@ plan_scenes(job, store)            # 8~10 個 Scene + 匯入目錄 + generation_
 
 - **兩者都重讀 store**，不信任傳進來的 `ContentJob`。傳一個過期的物件不會重跑一個階段，會拿到 `ScenePlanError`。
 - **`plan_scenes` 完全不呼叫 provider、不動預算。** 輸出是 Script 與 job 上限的純函式，同一份 script 永遠規劃出同一組 scene —— 這是需求不是巧合：重跑若洗牌，人工已經照舊 manifest 生好的素材就對不上了。
-- **冪等但會補寫，而且「已有 scenes」不等於「規劃完成」。** 因為規劃是純函式，job 還在 `SCENE_PLANNING` 時 `plan_scenes` 會**重算整份計畫並逐項比對**磁碟上的 scene；相符才短路，不符就重建。**只數檔案不夠** —— 一個 10 場景計畫崩到剩 8 個檔案，數量本身完全合理。過了 `SCENE_PLANNING` 之後計畫凍結、不再重算，但仍會檢查結構不變式（8~10、`scene_index` 連續、id 唯一、歸屬相符）；壞掉就報錯，不會拿殘骸去產一份只有一個 entry 的 manifest。匯入目錄每次補齊；manifest 在**缺少時或重建計畫時**重寫。
+- **冪等但會補寫，而且「已有 scenes」不等於「規劃完成」。** 因為規劃是純函式，job 還在 `SCENE_PLANNING` 時 `plan_scenes` 會**重算整份計畫並逐項比對**磁碟上的 scene；相符才短路，不符就重建。**只數檔案不夠** —— 一個 10 場景計畫崩到剩 8 個檔案，數量本身完全合理。過了 `SCENE_PLANNING` 之後計畫凍結、不再重算，但仍會檢查結構不變式（8~10、`scene_index` 連續、id 唯一、歸屬相符）；壞掉就報錯，不會拿殘骸去產一份只有一個 entry 的 manifest。匯入目錄每次補齊；**manifest 每次都跟 scene 逐欄比對**（只豁免 `created_at`），不一致就重寫 —— 不是比對「這次有沒有重建」，因為 scene 寫完、manifest 還沒寫就崩的話，下一次看到的 scene 已經跟腳本一致了。
+- **manifest 的 `accepted_mime_types` 每種副檔名只列一個 MIME。** SPEC §7 是「MIME sniffing 與副檔名雙重驗證」，所以不能一邊要求檔名 `scene-001.png`、一邊宣告接受 `image/jpeg` —— 那是叫操作者產出匯入階段會拒收的檔案。要放寬就得連檔名規則一起放寬。
 - **改 `script.json` 再跑 `plan_scenes` 就是 replan**（前提是 job 還在 `SCENE_PLANNING`）：scene 與 manifest 一起換新。**但已經人工匯入的素材不會被動**，而 scene id 會被重用 —— 也就是說 `scenes/scene-003/images/` 裡的舊圖會留在原地，卻對應到新的 narration。改稿重跑之後要自己清或重生受影響的素材。issue #8 接匯入驗證時要考慮這件事。
 - **`generation_manifest.json` 與 `scenes/<scene_id>/<kind>/` 刻意不在 `JobRecord` 裡**，所以 `replace()` 永遠刪不到它們（那些目錄可能已經有人工放進去的檔案）。走 `store.write_generation_manifest()` / `store.scene_media_dir()`，**不要**把它們塞進 `JobRecord`。
 - 匯入目錄是 **SPEC-001 §3.2 的形狀**：`scenes/{scene_id}/images/` 與 `scenes/{scene_id}/videos/`，依 `visual_type` 決定。PLAN-001 Q9 明文指名這個路徑。注意 `store.py` 其餘的目錄配置（扁平的 `scene-NNN.json`、沒有 `audit/`）**本來就跟 §3.2 不一致**，那是 issue #1 的既有偏差，#5 沒有擴大也沒有修它。
