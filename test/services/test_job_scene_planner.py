@@ -634,6 +634,58 @@ def test_planning_without_a_persisted_script_is_refused(tmp_path):
     assert store.read_generation_manifest(job.content_job_id) is None
 
 
+def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
+    """PRD-001 FR-004A and SPEC-001 12/14: no secret or credential in a prompt.
+
+    A Script is model output built from a user-supplied topic, so it is exactly
+    the text that can carry one by accident.
+    """
+    leaky = script_with_body(5).model_copy(
+        update={
+            "title": "部署手冊 api_key=sk-live-abcdefghijklmnop 請照做",
+            "core_message": "設定 Authorization: Bearer abcdefghijklmnopqrst 之後就能跑。",
+        }
+    )
+
+    store, job, scenes = planned(tmp_path, leaky)
+    manifest = store.read_generation_manifest(job.content_job_id)
+
+    for scene in scenes:
+        assert "sk-live-abcdefghijklmnop" not in scene.visual_prompt
+        assert "abcdefghijklmnopqrst" not in scene.visual_prompt
+    for entry in manifest.entries:
+        assert "sk-live-abcdefghijklmnop" not in entry.prompt
+        assert "abcdefghijklmnopqrst" not in entry.prompt
+
+    # Identifiers and narration are NOT redacted: doing that to identifiers is
+    # what broke idempotency keys once, and narration is what the voice stage
+    # has to speak.
+    assert [scene.scene_id for scene in scenes] == [
+        f"scene-{index:03d}" for index in range(1, len(scenes) + 1)
+    ]
+    assert all("<redacted>" not in scene.narration for scene in scenes)
+    assert all("<redacted>" not in entry.import_dir for entry in manifest.entries)
+
+
+def test_a_parked_job_is_not_handed_its_previous_plan(tmp_path):
+    """A job in MANUAL_ACTION_REQUIRED still has its old scenes on disk.
+
+    Adopting them would republish a manifest as if nothing were wrong and hide
+    the state that is asking for a human.
+    """
+    store, job, scenes = planned(tmp_path, script_with_body(5))
+    (tmp_path / job.content_job_id / "generation_manifest.json").unlink()
+    parked = store.load(job.content_job_id).job.model_copy(
+        update={"status": JobStatus.MANUAL_ACTION_REQUIRED}
+    )
+    store.save(parked)
+
+    with pytest.raises(ScenePlanError, match="SCENE_PLANNING"):
+        plan_scenes(parked, store)
+
+    assert store.read_generation_manifest(job.content_job_id) is None
+
+
 def test_replanning_does_not_append_a_second_transition(tmp_path):
     store, job, _ = planned(tmp_path, script_with_body(5))
     before = len(store.load(job.content_job_id).decisions)

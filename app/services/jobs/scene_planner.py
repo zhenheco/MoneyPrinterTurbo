@@ -34,6 +34,7 @@ from app.models.content_job import (
     Script,
     VisualType,
 )
+from app.services.jobs.budget import redact
 from app.services.jobs.state_machine import decision_record, transition, utc_now
 from app.services.jobs.store import JobStore
 
@@ -60,17 +61,31 @@ _SOFT_BREAK = "，、；;,"
 #: degrades into single-word scenes.
 _MIN_UNIT_CHARS = 6
 
-#: Every stage at or after scene planning has finished. A plan persisted while
-#: the job sits in one of these is frozen — later stages already built on those
-#: exact scenes — so it is checked structurally instead of recomputed. The four
-#: stages that come *before* a plan exists are excluded: scenes found there are
-#: not something this stage may adopt.
-_FROZEN_PLAN_STATUSES = frozenset(JobStatus) - frozenset(
+#: The stages a job reaches *after* scene planning succeeded. A plan persisted
+#: while the job sits in one of these is frozen — later stages already built on
+#: those exact scenes — so it is checked structurally instead of recomputed.
+#:
+#: Enumerated rather than subtracted, because the interesting exclusions are
+#: not the pre-planning stages but the failure ones. A job parked in
+#: ``MANUAL_ACTION_REQUIRED`` still has its previous scenes on disk; adopting
+#: them would hand the caller a plan and republish a manifest as if nothing
+#: were wrong, hiding the very state that is asking for a human.
+_FROZEN_PLAN_STATUSES = frozenset(
     {
-        JobStatus.DRAFT,
-        JobStatus.RESEARCHING,
-        JobStatus.SCRIPTING,
-        JobStatus.SCENE_PLANNING,
+        JobStatus.VOICE_GENERATING,
+        JobStatus.AWAITING_ASSETS,
+        JobStatus.IMAGE_GENERATING,
+        JobStatus.VIDEO_GENERATING,
+        JobStatus.READY_TO_RENDER,
+        JobStatus.RENDERING,
+        JobStatus.TECHNICAL_QA,
+        JobStatus.CONTENT_QA,
+        JobStatus.READY_FOR_REVIEW,
+        JobStatus.POSTIZ_DRAFTING,
+        JobStatus.POSTIZ_DRAFTED,
+        JobStatus.APPROVED,
+        JobStatus.SCHEDULED,
+        JobStatus.PUBLISHED,
     }
 )
 
@@ -363,12 +378,27 @@ def _phrase(text: str) -> str:
 def _visual_prompt(
     script: Script, scene_id: str, unit: _Unit, visual_type: str, caption: str
 ) -> str:
+    """Build one scene's generation prompt from the script.
+
+    Every script-derived fragment goes through :func:`redact` first. PRD-001
+    FR-004A and SPEC-001 §12 / §14 all say the same thing in the same words:
+    ``secret、credential 不得寫入 log、audit 摘要或 prompt``. A ``Script`` is
+    model output built from a user-supplied topic, so it is exactly the kind of
+    text that can carry one by accident.
+
+    Only the fragments are redacted, never the assembled string. ``scene_id``
+    and the fixed labels are locally built identifiers, and the repository has
+    already been bitten once by running those through a credential filter (a
+    job id containing ``session`` turned an idempotency key into
+    ``<redacted>`` and double-billed). ``Scene.narration`` is likewise left
+    alone: it is the text the voice stage must speak, not a prompt.
+    """
     purpose = _PURPOSE_LABELS.get(unit.purpose, unit.purpose)
     media = _MEDIA_LABELS.get(visual_type, visual_type)
     if visual_type == "title_card":
         requirement = (
             "畫面需求：直式 1080x1920 標題卡，深色背景、置中白字，"
-            f"主文字為「{caption}」。"
+            f"主文字為「{redact(caption)}」。"
         )
     else:
         requirement = (
@@ -377,9 +407,9 @@ def _visual_prompt(
         )
     return (
         f"為短影音場景 {scene_id}（{purpose}）產生{media}。"
-        f"影片主題：{_phrase(script.title)}。"
-        f"核心訊息：{_phrase(script.core_message)}。"
-        f"本段旁白：「{_phrase(unit.text)}」。{requirement}"
+        f"影片主題：{redact(_phrase(script.title))}。"
+        f"核心訊息：{redact(_phrase(script.core_message))}。"
+        f"本段旁白：「{redact(_phrase(unit.text))}」。{requirement}"
     )
 
 
