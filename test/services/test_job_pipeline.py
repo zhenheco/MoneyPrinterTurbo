@@ -1,9 +1,11 @@
 """Issue #4: create jobs and generate structured Script JSON."""
 
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from openai.types.chat import ChatCompletion
 
 from app.models.content_job import JobStatus
 from app.services.jobs import pipeline
@@ -144,7 +146,7 @@ def test_generate_script_accepts_first_valid_llm_json_and_persists_it(tmp_path):
     )
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script", return_value=response
+        "app.services.jobs.pipeline.llm_adapter.generate_script", return_value=response
     ) as llm_call:
         script = generate_script(job, store)
 
@@ -157,6 +159,109 @@ def test_generate_script_accepts_first_valid_llm_json_and_persists_it(tmp_path):
     }
 
 
+def test_generate_script_preserves_structured_json_through_provider_client(tmp_path):
+    store = JobStore(tmp_path)
+    job = start_scripting(create_job(valid_request(), store), store)
+    expected = json.loads(
+        (FIXTURES_ROOT / "three-scene-demo/scripts/script.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    completion = ChatCompletion.model_validate(
+        {
+            "id": "completion-regression",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {
+                        "content": json.dumps(expected, ensure_ascii=False),
+                        "role": "assistant",
+                    },
+                }
+            ],
+            "created": 0,
+            "model": "deepseek-v4-pro",
+            "object": "chat.completion",
+        }
+    )
+    fake_client = Mock()
+    fake_client.chat.completions.create.return_value = completion
+
+    with (
+        patch.dict(
+            pipeline.config.app,
+            {"deepseek_api_key": "demo-value"},
+            clear=False,
+        ),
+        patch("app.services.llm.OpenAI", return_value=fake_client),
+        patch("app.services.llm.generate_script") as legacy_generate,
+    ):
+        script = generate_script(job, store)
+
+    fake_client.chat.completions.create.assert_called_once()
+    legacy_generate.assert_not_called()
+    assert script.model_dump(mode="json") == expected
+    assert store.load(job.content_job_id).script.model_dump(mode="json") == expected
+    assert json.loads(
+        (tmp_path / job.content_job_id / "scripts/script.json").read_text(
+            encoding="utf-8"
+        )
+    ) == expected
+    assert script.body == expected["body"]
+    assert script.claims == expected["claims"]
+    assert script.sources == expected["sources"]
+    assert script.risk_flags == expected["risk_flags"]
+
+
+def test_generate_script_classifies_provider_client_failure_as_retryable(tmp_path):
+    store = JobStore(tmp_path)
+    job = start_scripting(create_job(valid_request(), store), store)
+    fake_client = Mock()
+    fake_client.chat.completions.create.side_effect = TimeoutError(
+        "provider timed out"
+    )
+
+    with (
+        patch.dict(
+            pipeline.config.app,
+            {"deepseek_api_key": "demo-value"},
+            clear=False,
+        ),
+        patch("app.services.llm.OpenAI", return_value=fake_client),
+    ):
+        with pytest.raises(
+            pipeline.llm_adapter.LlmTransportError, match="timed out"
+        ) as exc_info:
+            generate_script(job, store)
+
+    record = store.load(job.content_job_id)
+    assert exc_info.value.retryable is True
+    assert fake_client.chat.completions.create.call_count == 1
+    assert record.job.status is JobStatus.SCRIPTING
+    assert len(record.provider_events) == 1
+    assert record.provider_events[0].retryable is True
+    assert record.provider_events[0].error_class == "LlmTransportError"
+    assert record.provider_events[0].error_class != "script_schema_invalid"
+
+
+def test_generate_script_classifies_missing_api_key_as_non_retryable(tmp_path):
+    store = JobStore(tmp_path)
+    job = start_scripting(create_job(valid_request(), store), store)
+
+    with pytest.raises(
+        pipeline.llm_adapter.LlmTransportError, match="api_key is not set"
+    ) as exc_info:
+        generate_script(job, store)
+
+    record = store.load(job.content_job_id)
+    assert exc_info.value.retryable is False
+    assert record.job.status is JobStatus.MANUAL_ACTION_REQUIRED
+    assert len(record.provider_events) == 1
+    assert record.provider_events[0].retryable is False
+    assert record.provider_events[0].error_class == "LlmTransportError"
+
+
 def test_generate_script_is_idempotent_after_success(tmp_path):
     store = JobStore(tmp_path)
     job = start_scripting(create_job(valid_request(), store), store)
@@ -165,14 +270,14 @@ def test_generate_script_is_idempotent_after_success(tmp_path):
     )
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script", return_value=valid
+        "app.services.jobs.pipeline.llm_adapter.generate_script", return_value=valid
     ) as first_call:
         script = generate_script(job, store)
 
     script_path = tmp_path / job.content_job_id / "scripts/script.json"
     before_bytes = script_path.read_bytes()
     before_record = store.load(job.content_job_id)
-    with patch("app.services.jobs.pipeline.llm.generate_script") as second_call:
+    with patch("app.services.jobs.pipeline.llm_adapter.generate_script") as second_call:
         reinvoked = generate_script(job, store)
 
     after_record = store.load(job.content_job_id)
@@ -195,14 +300,14 @@ def test_generate_script_repairs_one_invalid_response_then_persists(tmp_path):
 
     invalid = '{"title": broken}'
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=[invalid, valid],
     ) as llm_call:
         script = generate_script(job, store)
 
     assert store.load(job.content_job_id).script == script
     assert llm_call.call_count == 2
-    repair_prompt = llm_call.call_args_list[1].kwargs["video_script_prompt"]
+    repair_prompt = llm_call.call_args_list[1].kwargs["repair_prompt"]
     assert "Expecting value" in repair_prompt
     assert invalid in repair_prompt
     record = store.load(job.content_job_id)
@@ -210,6 +315,56 @@ def test_generate_script_repairs_one_invalid_response_then_persists(tmp_path):
     assert len(record.provider_events) == 2
     assert len(record.usage_ledger) == 2
     assert record.job.actual_cost_usd == pytest.approx(0.1)
+
+
+def test_generate_script_sends_repair_context_through_provider_client(tmp_path):
+    store = JobStore(tmp_path)
+    job = start_scripting(create_job(valid_request(), store), store)
+    valid = (FIXTURES_ROOT / "three-scene-demo/scripts/script.json").read_text(
+        encoding="utf-8"
+    )
+    invalid = '{"title": broken}'
+
+    def completion(response_id, content):
+        return ChatCompletion.model_validate(
+            {
+                "id": response_id,
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "index": 0,
+                        "message": {"content": content, "role": "assistant"},
+                    }
+                ],
+                "created": 0,
+                "model": "deepseek-v4-pro",
+                "object": "chat.completion",
+            }
+        )
+
+    fake_client = Mock()
+    fake_client.chat.completions.create.side_effect = [
+        completion("completion-invalid", invalid),
+        completion("completion-valid", valid),
+    ]
+
+    with (
+        patch.dict(
+            pipeline.config.app,
+            {"deepseek_api_key": "demo-value"},
+            clear=False,
+        ),
+        patch("app.services.llm.OpenAI", return_value=fake_client),
+    ):
+        script = generate_script(job, store)
+
+    assert store.load(job.content_job_id).script == script
+    assert fake_client.chat.completions.create.call_count == 2
+    second_messages = fake_client.chat.completions.create.call_args_list[1].kwargs[
+        "messages"
+    ]
+    assert "Expecting value" in second_messages[0]["content"]
+    assert invalid in second_messages[0]["content"]
 
 
 def test_default_budget_allows_initial_and_repair_calls_at_conservative_ceiling(
@@ -222,7 +377,7 @@ def test_default_budget_allows_initial_and_repair_calls_at_conservative_ceiling(
     )
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=['{"title": broken}', valid],
     ):
         generate_script(job, store)
@@ -241,14 +396,14 @@ def test_generate_script_marks_truncated_repair_context(tmp_path):
     invalid = '{"title": "' + ("x" * 2_500)
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=[invalid, valid],
     ) as llm_call:
         generate_script(job, store)
 
-    repair_prompt = llm_call.call_args_list[1].kwargs["video_script_prompt"]
+    repair_prompt = llm_call.call_args_list[1].kwargs["repair_prompt"]
     assert repair_prompt.endswith("[truncated]")
-    assert len(repair_prompt) <= pipeline.llm.MAX_SCRIPT_PROMPT_LENGTH
+    assert len(repair_prompt) <= pipeline._REPAIR_CONTEXT_MAX_CHARS + 200
     assert invalid not in repair_prompt
 
 
@@ -258,7 +413,7 @@ def test_generate_script_fails_before_call_when_provider_identity_is_unknown(tmp
 
     with (
         patch.dict(pipeline.config.app, {"llm_provider": "missing"}, clear=True),
-        patch("app.services.jobs.pipeline.llm.generate_script") as llm_call,
+        patch("app.services.jobs.pipeline.llm_adapter.generate_script") as llm_call,
     ):
         with pytest.raises(ValueError, match="unsupported llm provider"):
             generate_script(job, store)
@@ -274,7 +429,7 @@ def test_generate_script_rejects_two_invalid_responses_without_a_third_call_or_f
     job = start_scripting(create_job(valid_request(), store), store)
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=['{"title": "incomplete"}', "still-not-json"],
     ) as llm_call:
         with pytest.raises(ScriptGenerationError, match="two attempts"):
@@ -312,7 +467,7 @@ def test_generate_script_requires_scripting_status(tmp_path, status):
     guarded = draft.model_copy(update={"status": status})
     store.save(guarded)
 
-    with patch("app.services.jobs.pipeline.llm.generate_script") as llm_call:
+    with patch("app.services.jobs.pipeline.llm_adapter.generate_script") as llm_call:
         with pytest.raises(IllegalTransitionError, match="SCRIPTING"):
             generate_script(guarded, store)
 
@@ -328,7 +483,7 @@ def test_generate_script_retries_across_calls_with_new_attempt_and_cost(tmp_path
     )
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=TimeoutError("provider timed out"),
     ) as first_call:
         with pytest.raises(TimeoutError, match="provider timed out"):
@@ -342,7 +497,7 @@ def test_generate_script_retries_across_calls_with_new_attempt_and_cost(tmp_path
     first_call.assert_called_once()
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script", return_value=valid
+        "app.services.jobs.pipeline.llm_adapter.generate_script", return_value=valid
     ) as second_call:
         script = generate_script(job, store)
 
@@ -371,19 +526,19 @@ def test_generate_script_is_idempotent_after_timeout_then_success(tmp_path):
     )
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=TimeoutError("provider timed out"),
     ):
         with pytest.raises(TimeoutError):
             generate_script(job, store)
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script", return_value=valid
+        "app.services.jobs.pipeline.llm_adapter.generate_script", return_value=valid
     ):
         script = generate_script(job, store)
 
     before_record = store.load(job.content_job_id)
-    with patch("app.services.jobs.pipeline.llm.generate_script") as reinvoke:
+    with patch("app.services.jobs.pipeline.llm_adapter.generate_script") as reinvoke:
         assert generate_script(job, store) == script
 
     after_record = store.load(job.content_job_id)
@@ -402,13 +557,13 @@ def test_generate_script_exhausts_cross_call_attempt_budget_without_provider_cal
 
     for message in ("first timeout", "second timeout"):
         with patch(
-            "app.services.jobs.pipeline.llm.generate_script",
+            "app.services.jobs.pipeline.llm_adapter.generate_script",
             side_effect=TimeoutError(message),
         ):
             with pytest.raises(TimeoutError, match=message):
                 generate_script(job, store)
 
-    with patch("app.services.jobs.pipeline.llm.generate_script") as third_call:
+    with patch("app.services.jobs.pipeline.llm_adapter.generate_script") as third_call:
         with pytest.raises(ScriptGenerationError, match="attempt limit"):
             generate_script(job, store)
 
@@ -426,7 +581,7 @@ def test_generate_script_uses_persisted_status_guard_for_stale_job(tmp_path):
     persisted_manual = job.model_copy(update={"status": JobStatus.MANUAL_ACTION_REQUIRED})
     store.save(persisted_manual)
 
-    with patch("app.services.jobs.pipeline.llm.generate_script") as llm_call:
+    with patch("app.services.jobs.pipeline.llm_adapter.generate_script") as llm_call:
         with pytest.raises(IllegalTransitionError, match="SCRIPTING"):
             generate_script(job, store)
 
@@ -446,7 +601,7 @@ def test_generate_script_blocks_call_when_conservative_estimate_exceeds_budget(
         patch(
             "app.services.jobs.pipeline.check_budget", wraps=real_check_budget
         ) as budget_gate,
-        patch("app.services.jobs.pipeline.llm.generate_script") as llm_call,
+        patch("app.services.jobs.pipeline.llm_adapter.generate_script") as llm_call,
     ):
         with pytest.raises(BudgetExceededError):
             generate_script(job, store)
@@ -467,7 +622,7 @@ def test_generate_script_audits_llm_exception_and_classifies_retryability(tmp_pa
     job = start_scripting(create_job(valid_request(), store), store)
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=TimeoutError("provider timed out"),
     ):
         with pytest.raises(TimeoutError, match="provider timed out"):
@@ -495,7 +650,7 @@ def test_generate_script_audits_non_retryable_provider_exception_as_manual_actio
     job = start_scripting(create_job(valid_request(), store), store)
 
     with patch(
-        "app.services.jobs.pipeline.llm.generate_script",
+        "app.services.jobs.pipeline.llm_adapter.generate_script",
         side_effect=PermissionError("provider access denied"),
     ):
         with pytest.raises(PermissionError, match="provider access denied"):
@@ -524,7 +679,7 @@ def test_generate_script_gates_and_audits_every_llm_call(tmp_path, responses):
             "app.services.jobs.pipeline.check_budget", wraps=real_check_budget
         ) as budget_gate,
         patch(
-            "app.services.jobs.pipeline.llm.generate_script",
+            "app.services.jobs.pipeline.llm_adapter.generate_script",
             side_effect=response_values,
         ) as llm_call,
     ):
