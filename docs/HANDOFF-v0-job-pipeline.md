@@ -29,7 +29,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 | `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 
-測試基準（2026-08-28 實測）：**1388 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1392 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 （前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
@@ -38,7 +38,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1388 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1392 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -127,7 +127,7 @@ plan_scenes(job, store)            # 8~10 個 Scene + 匯入目錄 + generation_
 
 - **兩者都重讀 store**，不信任傳進來的 `ContentJob`。傳一個過期的物件不會重跑一個階段，會拿到 `ScenePlanError`。
 - **`plan_scenes` 完全不呼叫 provider、不動預算。** 輸出是 Script 與 job 上限的純函式，同一份 script 永遠規劃出同一組 scene —— 這是需求不是巧合：重跑若洗牌，人工已經照舊 manifest 生好的素材就對不上了。
-- **冪等但會補寫。** 已有 scenes 就不重規劃，但匯入目錄與 manifest 每次都會補齊缺的那一份 —— scene 文件、目錄、manifest 是三次獨立寫入，崩在中間時重跑必須能收尾（有測試釘住）。
+- **冪等但會補寫，而且「已有 scenes」不等於「規劃完成」。** `plan_scenes` 只在持久化的 scene 集合是**完整計畫**（數量在 8~10、`scene_index` 連續 1..N、job id 相符）時才短路；否則視為崩潰殘骸重新規劃。匯入目錄與 manifest 則每次都補齊缺的那一份。`JobStore.replace` 是一個 scene 一個檔案，崩在中間會留下前綴 —— 把前綴當成「已規劃」會產出少於 8 個 entry 的 manifest 並讓 job 永久卡住。三種缺失（部分 scene、缺目錄、缺 manifest）各有測試釘住。
 - **`generation_manifest.json` 與 `assets/scenes/<scene_id>/` 刻意不在 `JobRecord` 裡**，所以 `replace()` 永遠刪不到它們（那些目錄可能已經有人工放進去的檔案）。走 `store.write_generation_manifest()` / `store.scene_asset_dir()`，**不要**把它們塞進 `JobRecord`。
 - manifest 的 `import_dir` 是**相對於 job 目錄**的 POSIX 路徑（`assets/scenes/scene-001`）。不要改成絕對路徑，job 樹會被搬。
 - `generated_video` 名額 = `min(job.max_generated_video_scenes, 3, body scene 數 // 3)`，取 narration 最長的 body scene，同長度時取 index 小的。**上限是天花板不是配額**，所以典型 V0 job 只會拿到 1~2 個 AI 影片。
@@ -189,7 +189,7 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 - `JobStore` 沒有 `DEFAULT_ROOT` 常數，`storage/jobs` 只出現在 docstring，實際路徑靠呼叫端自律。
 - `_utc_now()` 仍有三份逐字複製（`postiz.py`、`state_machine.py`、`pipeline.py`），格式一致但沒有測試釘住。issue #5 沒有再複製第四份：`state_machine` 的那份已改成公開的 `utc_now()`（`_utc_now` 留成別名），`scene_planner` 直接引用它。**另外兩份沒有動** —— 那是本次範圍外的重構。
 - **Scene Planner 是純詞法切分，沒有語意理解。** 場景邊界只看句號與逗號，`visual_type` 只看 `semantic_purpose` 與 narration 長度，`visual_prompt` 是樣板字串。產出的 prompt 可以直接拿去生圖，但**不會比腳本本身更聰明**；要更好的分鏡就得引入一次 LLM 呼叫，那會連帶需要預算閘門與 ProviderEvent（目前完全沒有）。
-- **body 只有一段的腳本會被 `ScenePlanError` 拒絕。** 這種腳本在標點邊界上最多只能切出 7 個場景，湊到 8 就得切進詞組中間，產出的 narration 是 voice 階段沒法用的碎片。這是刻意選擇：寧可拒絕，不要降級。有測試釘住。
+- **太瘦的腳本會被從中間硬切，narration 可能斷在詞組中間。** 切分優先用句號、再用逗號；標點用完還湊不到 8 個場景時，最後手段是**從字數中點切**。實測 body 只有一段的腳本會產出 `第 1 個問` / `題是節奏太平，` 這種切法。這是刻意的取捨：`SPEC-001 §5.2` 沒有任何一條邊可以從 `SCENE_PLANNING` 走到失敗狀態，所以拒絕會讓 job **卡在 SCENE_PLANNING 且沒有任何操作訊號**；硬切至少是無損的（narration 拼回來等於原腳本，有測試釘住），人改稿重跑就能修好。**#6 / #7 要知道 narration 可能是半個詞組。** 只有整體字數少到連 8 段 ≥6 字都湊不出來時才會 `ScenePlanError`。
 - **`plan_scenes` 沒有 replan 路徑。** 已有 scenes 就短路，所以規劃完之後改 `script.json` 不會重新分鏡。issue #11 若需要「改稿後重跑」，要另外設計一條會明確標示並保護既有匯入素材的 replan。
 - 從中間切開的 scene，narration 會以「，」結尾（例如 `錯誤三：沒有驗收標準，`）。對 TTS 是合法的停頓，但**不要**在後續階段順手 strip 掉 —— 那會讓 narration 不再能拼回原腳本。
 - `budget.redact()` 只認得有標記或有固定前綴的憑證形狀，**裸 hex/UUID token 認不出來**。`postiz` 因此另外用自己知道的 token 值做明確比對（`_scrub`）。新增 provider adapter 時要沿用這個做法。
@@ -218,4 +218,4 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 
 4. **合理的論證不等於正確的論證。** 修憑證外洩時採用了「統一讓所有欄位過 redact」這個聽起來更一致的做法，結果把合法 job id 的 idempotency key 吃掉、去重失效、重複計費。**聽起來合理的說法要實測，尤其是它推翻了某個 per-case 處理的時候。**
 
-5. **「冪等」的短路條件必須涵蓋每一次寫入，不能只看第一次。** issue #5 的 `plan_scenes` 一開始用「已有 scenes 就直接回傳」當冪等，但它其實做三次獨立寫入（scene 文件 → 匯入目錄 → manifest）。崩在第一次之後，重跑會因為 scenes 已存在而短路，manifest 永遠補不回來 —— 而且所有測試都會綠，因為沒有一條測試模擬過中途崩潰。**多步驟寫入的冪等，要用「缺什麼補什麼」而不是「做過就跳過」，並且要有一條測試真的把中間產物刪掉再重跑。**
+5. **「冪等」的短路條件必須涵蓋每一次寫入，而且要判斷「完整」不是「存在」。** issue #5 的 `plan_scenes` 一開始用「已有 scenes 就直接回傳」當冪等，但它其實做多次獨立寫入（每個 scene 一個檔案 → 匯入目錄 → manifest）。崩在中途重跑會短路，manifest 永遠補不回來；更糟的是 `JobStore.replace` 崩在寫檔迴圈中間會留下 scene 前綴，那個前綴會被當成「已規劃」，產出少於 8 個 entry 的 manifest 並讓 job 永久卡住。兩個缺陷的測試都會全綠，因為沒有一條測試模擬過中途崩潰。**多步驟寫入的冪等要用「缺什麼補什麼」，短路條件要驗完整性（數量、連續性、歸屬），並且要有測試真的把中間產物刪掉再重跑。**（第二個缺陷是獨立 reviewer 抓到的，不是測試抓到的。）

@@ -145,27 +145,37 @@ def test_frozen_fixtures_plan_into_the_allowed_scene_range(tmp_path, fixture):
     assert MIN_SCENES <= len(scenes) <= MAX_SCENES
 
 
-@pytest.mark.parametrize("body_count", list(range(2, 13)))
+@pytest.mark.parametrize("body_count", list(range(1, 13)))
 def test_any_body_length_still_plans_into_the_allowed_range(tmp_path, body_count):
     _, _, scenes = planned(tmp_path, script_with_body(body_count))
 
     assert MIN_SCENES <= len(scenes) <= MAX_SCENES
 
 
-def test_a_single_body_line_is_refused_rather_than_cut_mid_phrase(tmp_path):
-    """One body line yields at most 7 clause-boundary scenes.
+def test_a_punctuation_poor_script_is_still_cut_into_the_minimum(tmp_path):
+    """No commas to cut on must not wedge the job.
 
-    Reaching 8 would mean cutting inside a phrase, which produces narration no
-    voice stage can use — so the planner refuses instead of degrading.
+    §5.2 has no edge out of SCENE_PLANNING for a planning failure, so refusing
+    here would strand the job with no operator signal. A midpoint cut is the
+    lesser evil and stays inside the 8-10 contract.
     """
-    store, job = seeded_store(tmp_path, script_with_body(1))
-    planning = start_scene_planning(job, store)
+    unpunctuated = Script(
+        title="完播率拆解",
+        target_audience="自媒體經營者",
+        core_message="完播率可以逐項拆解修好",
+        hook="你的短影音沒有人看完問題其實不在演算法而在前三秒",
+        body=["第一個原因是資訊密度太低前十秒只講了一句話沒有給觀眾理由留下"],
+        conclusion="從下一支片的第一秒開始改這週就看得到差別不需要換設備",
+        cta="留言告訴我你卡在哪一項我會逐題回覆",
+        claims=[],
+        sources=[],
+        risk_flags=[],
+    )
 
-    with pytest.raises(ScenePlanError, match="8"):
-        plan_scenes(planning, store)
+    _, _, scenes = planned(tmp_path, unpunctuated)
 
-    assert store.load(job.content_job_id).scenes == []
-    assert store.read_generation_manifest(job.content_job_id) is None
+    assert MIN_SCENES <= len(scenes) <= MAX_SCENES
+    assert all(scene.narration.strip() for scene in scenes)
 
 
 @pytest.mark.parametrize(
@@ -234,13 +244,20 @@ def test_durations_add_up_to_the_requested_target(tmp_path):
     assert all(scene.duration_target_ms > 0 for scene in scenes)
 
 
-def test_narration_covers_the_whole_script_without_loss(tmp_path):
-    script = script_with_body(5)
+@pytest.mark.parametrize("body_count", [1, 5, 11])
+def test_narration_reassembles_into_the_original_script_in_order(
+    tmp_path, body_count
+):
+    """Splitting and merging must move text around, never lose or reorder it.
+
+    Body 1 exercises splitting, 5 exercises neither, 11 exercises merging.
+    """
+    script = script_with_body(body_count)
     _, _, scenes = planned(tmp_path, script)
 
-    joined = "".join(scene.narration for scene in scenes).replace(" ", "")
-    for part in [script.hook, *script.body, script.conclusion, script.cta]:
-        assert part.replace(" ", "") in joined
+    assert "".join(scene.narration for scene in scenes) == "".join(
+        [script.hook, *script.body, script.conclusion, script.cta]
+    )
 
 
 # -- the generated_video ceiling ------------------------------------------
@@ -285,12 +302,16 @@ def test_each_scene_gets_its_own_import_directory_inside_the_job(tmp_path):
     assert len(manifest.entries) == len(scenes)
 
     seen = set()
+    root = job_dir.resolve()
     for entry in manifest.entries:
         assert not Path(entry.import_dir).is_absolute()
         assert ".." not in Path(entry.import_dir).parts
         resolved = (job_dir / entry.import_dir).resolve()
         assert resolved.is_dir()
-        assert str(resolved).startswith(str(job_dir.resolve()) + "/")
+        # is_relative_to, not a string prefix: a "/" suffix check is wrong on
+        # Windows, which this repo's CI does run.
+        assert resolved.is_relative_to(root)
+        assert resolved != root
         assert entry.import_dir not in seen
         seen.add(entry.import_dir)
 
@@ -369,6 +390,27 @@ def test_rerun_restores_a_manifest_lost_between_the_two_writes(tmp_path):
     restored = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert restored["entries"] == before["entries"]
     assert restored["generated_video_scene_count"] == before["generated_video_scene_count"]
+
+
+def test_rerun_rebuilds_a_scene_set_left_partial_by_a_crash(tmp_path):
+    """``JobStore.replace`` writes one file per scene; a crash leaves a prefix.
+
+    Treating that prefix as "already planned" would publish a manifest with
+    fewer than MIN_SCENES entries and wedge the job there for good.
+    """
+    store, job, scenes = planned(tmp_path, script_with_body(5))
+    job_dir = tmp_path / job.content_job_id
+    for scene in scenes[3:]:
+        (job_dir / "scenes" / f"scene-{scene.scene_index:03d}.json").unlink()
+    (job_dir / "generation_manifest.json").unlink()
+    assert len(store.load(job.content_job_id).scenes) == 3
+
+    again = plan_scenes(store.load(job.content_job_id).job, store)
+
+    assert again == scenes
+    assert store.load(job.content_job_id).scenes == scenes
+    manifest = store.read_generation_manifest(job.content_job_id)
+    assert len(manifest.entries) == len(scenes)
 
 
 def test_rerun_recreates_an_import_directory_that_was_removed(tmp_path):

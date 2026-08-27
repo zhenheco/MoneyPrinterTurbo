@@ -137,9 +137,18 @@ def _initial_units(script: Script) -> List[_Unit]:
 
 
 def _split_text(text: str) -> Optional[Tuple[str, str]]:
-    """Cut ``text`` at the soft break closest to its midpoint, or give up.
+    """Cut ``text`` in two: at the soft break nearest its midpoint if there is
+    one, otherwise at the midpoint itself.
 
     Ties go to the earlier break so the choice never depends on iteration order.
+
+    The midpoint fallback is deliberate. A script whose sentences carry no
+    commas would otherwise dead-end here, and there is nowhere for the job to
+    go: §5.2 has no edge out of ``SCENE_PLANNING`` for a planning failure, so
+    it would sit in that state with no operator signal. A slightly awkward cut
+    is recoverable — a human edits the script and replans — a wedged job is
+    not. Only a script with too few characters to make ``MIN_SCENES`` readable
+    units is refused, and that refusal is reported.
     """
     midpoint = len(text) / 2
     best: Optional[Tuple[float, str, str]] = None
@@ -152,7 +161,12 @@ def _split_text(text: str) -> Optional[Tuple[str, str]]:
         distance = abs(len(head) - midpoint)
         if best is None or distance < best[0]:
             best = (distance, head, tail)
-    return None if best is None else (best[1], best[2])
+    if best is not None:
+        return best[1], best[2]
+    if len(text) >= _MIN_UNIT_CHARS * 2:
+        cut = len(text) // 2
+        return text[:cut], text[cut:]
+    return None
 
 
 def _merge_shortest_pair(units: List[_Unit]) -> bool:
@@ -202,10 +216,26 @@ def _segment(script: Script) -> List[_Unit]:
     while len(units) < MIN_SCENES:
         if not _split_longest(units):
             raise ScenePlanError(
-                f"script yields only {len(units)} scenes and cannot be split into "
-                f"the required {MIN_SCENES}"
+                f"script yields only {len(units)} scenes and is too short to split "
+                f"into the required {MIN_SCENES}: every remaining unit is under "
+                f"{_MIN_UNIT_CHARS * 2} characters"
             )
     return units
+
+
+def _is_complete_plan(job: ContentJob, scenes: Sequence[Scene]) -> bool:
+    """Is a persisted scene set a whole plan, or the debris of a crash?
+
+    ``JobStore.replace`` writes one ``scene-NNN.json`` per scene, so a crash
+    part-way through leaves a prefix on disk. Loading that prefix and treating
+    it as "already planned" would publish a manifest with fewer than
+    ``MIN_SCENES`` entries and wedge the job there permanently.
+    """
+    return (
+        MIN_SCENES <= len(scenes) <= MAX_SCENES
+        and all(scene.content_job_id == job.content_job_id for scene in scenes)
+        and [scene.scene_index for scene in scenes] == list(range(1, len(scenes) + 1))
+    )
 
 
 # -- per-scene decisions ---------------------------------------------------
@@ -384,19 +414,20 @@ def start_scene_planning(job: ContentJob, store: JobStore) -> ContentJob:
 def plan_scenes(job: ContentJob, store: JobStore) -> List[Scene]:
     """Plan, persist and publish the scenes and generation manifest for ``job``.
 
-    Idempotent: a job that already has scenes keeps them, so a replan never
-    rewrites the manifest a human is working against and never touches what
-    they already imported.
+    Idempotent: a job that already holds a *complete* plan keeps it, so a
+    replan never rewrites the manifest a human is working against and never
+    touches what they already imported.
 
-    Publication is three separate writes — scene documents, import directories,
-    manifest — so a crash can land between them. Re-running finishes whichever
-    ones are missing instead of short-circuiting on the scenes alone and
-    leaving the job permanently without its manifest.
+    Publication is several separate writes — one file per scene, then the
+    import directories, then the manifest — so a crash can land between any of
+    them. Re-running finishes whichever are missing, and rebuilds a scene set
+    that is only a partial prefix. "Already did some of it" is not the same as
+    "done", and short-circuiting on the first of those would wedge the job.
     """
     job_id = job.content_job_id
     record = store.load(job_id)
     scenes = record.scenes
-    if not scenes:
+    if not _is_complete_plan(record.job, scenes):
         if record.job.status is not JobStatus.SCENE_PLANNING:
             raise ScenePlanError(
                 f"plan_scenes requires SCENE_PLANNING, got {record.job.status.value}"
