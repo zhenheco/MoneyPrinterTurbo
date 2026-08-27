@@ -91,6 +91,12 @@ _FROZEN_PLAN_STATUSES = frozenset(
 
 _CAPTION_MAX_CHARS = 20
 
+#: What a prompt says instead of quoting narration whose source field tripped
+#: the credential filter. Deliberately actionable: over-redaction here is
+#: usually a false positive (``budget.redact`` treats the bare word ``token``
+#: as credential-shaped), and the operator needs to know which it is.
+_WITHHELD = "（本段旁白被憑證過濾器標記，已從 prompt 略去；請確認腳本是否誤含憑證）"
+
 _PURPOSE_LABELS = {
     "hook": "開場鉤子",
     "body": "內文",
@@ -141,6 +147,15 @@ class _Unit:
 
     purpose: str
     text: str
+    #: The Script field this slice came from matched the credential filter.
+    #:
+    #: The slice itself is kept raw — it is what the voice stage speaks — but
+    #: the prompt must not quote it. Redacting the slices instead of the field
+    #: does not work: measured, ``api_key=sk-x,<token>`` splits at the ASCII
+    #: comma into ``<redacted>`` and a bare token that no pattern matches any
+    #: more. Deciding per source field is what makes the prompt safe whatever
+    #: way the split happened to fall.
+    suspect: bool = False
 
 
 # -- narrative segmentation ------------------------------------------------
@@ -163,25 +178,26 @@ def _sentences(text: str) -> List[str]:
 def _initial_units(script: Script) -> List[_Unit]:
     """The script in narrative order, one unit per sentence.
 
-    Each field is redacted *whole*, before it is cut up. Redacting the pieces
-    afterwards is not equivalent: ``api_key=sk-x，<token>`` splits at the comma
-    into a half that still looks like a ``key=value`` pair and a half that is
-    just a bare token, and only the first half would be caught. Sanitizing the
-    source removes the credential once, everywhere it would otherwise flow —
-    narration, caption and prompt alike.
+    Each field is *tested* against the credential filter whole, before it is
+    cut up, and the verdict rides along on every unit it produces. The text
+    itself is never rewritten here.
 
-    For a script with no credential in it ``redact`` is the identity, so this
-    costs nothing and the narration still reassembles into the script exactly.
+    Both halves of that matter. Testing the whole field is what closes the
+    split hole — measured, ``api_key=sk-x,<token>`` cut at the ASCII comma
+    leaves a bare token no pattern matches. Not rewriting is what keeps
+    narration usable: ``budget.redact`` is a deliberately greedy *summary*
+    filter, and measured, it turns the ordinary sentence ``token economy 正在
+    改變創作者的收入結構`` into ``<redacted> 正在改變創作者的收入結構``. Running
+    narration through it would corrupt legitimate scripts, which is the same
+    mistake that once ate a job's idempotency key.
     """
-    segments: List[Tuple[str, str]] = [("hook", redact(script.hook))]
-    segments += [("body", redact(item)) for item in script.body]
-    segments += [
-        ("conclusion", redact(script.conclusion)),
-        ("cta", redact(script.cta)),
-    ]
+    segments: List[Tuple[str, str]] = [("hook", script.hook)]
+    segments += [("body", item) for item in script.body]
+    segments += [("conclusion", script.conclusion), ("cta", script.cta)]
     units: List[_Unit] = []
     for purpose, text in segments:
-        units += [_Unit(purpose, sentence) for sentence in _sentences(text)]
+        suspect = redact(text) != text
+        units += [_Unit(purpose, sentence, suspect) for sentence in _sentences(text)]
     return units
 
 
@@ -241,7 +257,11 @@ def _merge_shortest_pair(units: List[_Unit]) -> bool:
         return False
     index = best[1]
     units[index : index + 2] = [
-        _Unit(units[index].purpose, units[index].text + units[index + 1].text)
+        _Unit(
+            units[index].purpose,
+            units[index].text + units[index + 1].text,
+            units[index].suspect or units[index + 1].suspect,
+        )
     ]
     return True
 
@@ -253,9 +273,10 @@ def _split_longest(units: List[_Unit]) -> bool:
         if halves is None:
             continue
         purpose = units[position].purpose
+        suspect = units[position].suspect
         units[position : position + 1] = [
-            _Unit(purpose, halves[0]),
-            _Unit(purpose, halves[1]),
+            _Unit(purpose, halves[0], suspect),
+            _Unit(purpose, halves[1], suspect),
         ]
         return True
     return False
@@ -394,36 +415,41 @@ def _visual_prompt(
 ) -> str:
     """Build one scene's generation prompt from the script.
 
-    Every script-derived fragment goes through :func:`redact` first. PRD-001
-    FR-004A and SPEC-001 §12 / §14 all say the same thing in the same words:
-    ``secret、credential 不得寫入 log、audit 摘要或 prompt``. A ``Script`` is
-    model output built from a user-supplied topic, so it is exactly the kind of
-    text that can carry one by accident.
+    PRD-001 FR-004A and SPEC-001 §12 / §14 all say the same thing in the same
+    words: ``secret、credential 不得寫入 log、audit 摘要或 prompt``. A ``Script``
+    is model output built from a user-supplied topic, so it is exactly the kind
+    of text that can carry one by accident.
 
-    Only the fragments are redacted, never the assembled string. ``scene_id``
-    and the fixed labels are locally built identifiers, and the repository has
-    already been bitten once by running those through a credential filter (a
-    job id containing ``session`` turned an idempotency key into
-    ``<redacted>`` and double-billed). ``Scene.narration`` is likewise left
-    alone: it is the text the voice stage must speak, not a prompt.
+    Two different treatments, because the fields differ. ``title`` and
+    ``core_message`` are quoted whole, so redacting them is exact. The
+    narration line is a *slice* of a field, so it is withheld entirely when its
+    source field looked suspect — a slice can carry a credential the filter can
+    no longer see once a delimiter has cut it in half.
+
+    What is never redacted: ``scene_id`` and the fixed labels (locally built
+    identifiers — running those through a credential filter is what once turned
+    an idempotency key into ``<redacted>`` and double-billed), and
+    ``Scene.narration`` itself, which the voice stage has to speak.
     """
     purpose = _PURPOSE_LABELS.get(unit.purpose, unit.purpose)
     media = _MEDIA_LABELS.get(visual_type, visual_type)
     if visual_type == "title_card":
+        card_text = _WITHHELD if unit.suspect else caption
         requirement = (
             "畫面需求：直式 1080x1920 標題卡，深色背景、置中白字，"
-            f"主文字為「{redact(caption)}」。"
+            f"主文字為「{card_text}」。"
         )
     else:
         requirement = (
             "畫面需求：直式 1080x1920、構圖與旁白語意一致、"
             "畫面內不要出現任何文字或浮水印。"
         )
+    line = _WITHHELD if unit.suspect else f"「{_phrase(unit.text)}」"
     return (
         f"為短影音場景 {scene_id}（{purpose}）產生{media}。"
         f"影片主題：{redact(_phrase(script.title))}。"
         f"核心訊息：{redact(_phrase(script.core_message))}。"
-        f"本段旁白：「{redact(_phrase(unit.text))}」。{requirement}"
+        f"本段旁白：{line}。{requirement}"
     )
 
 

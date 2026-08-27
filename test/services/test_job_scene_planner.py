@@ -644,15 +644,15 @@ def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
         update={
             "title": "部署手冊 api_key=sk-live-abcdefghijklmnop 請照做",
             "core_message": "設定 Authorization: Bearer abcdefghijklmnopqrst 之後就能跑。",
-            # The comma matters: it is a split point, so redacting the pieces
-            # after segmentation would leave the bare token in its own scene.
-            "conclusion": "最後把 api_key=sk-live-zyxwvutsrqponm，貼進設定檔就完成了。",
+            # The ASCII comma matters: it is both a split point and a boundary
+            # the credential pattern stops at, so redacting the pieces after
+            # segmentation leaves the bare token alone in its own scene.
+            "conclusion": "最後把 api_key=sk-x,abcdefghijklmnopqrst 貼進設定檔就完成了。",
         }
     )
     secrets = (
         "sk-live-abcdefghijklmnop",
         "abcdefghijklmnopqrst",
-        "sk-live-zyxwvutsrqponm",
     )
 
     store, job, scenes = planned(tmp_path, leaky)
@@ -661,11 +661,8 @@ def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
     for secret in secrets:
         for scene in scenes:
             assert secret not in scene.visual_prompt, scene.scene_id
-            assert secret not in scene.narration, scene.scene_id
-            assert secret not in scene.caption, scene.scene_id
         for entry in manifest.entries:
             assert secret not in entry.prompt, entry.scene_id
-            assert secret not in entry.narration, entry.scene_id
 
     # Identifiers are NOT redacted: doing that is what broke idempotency keys
     # once and caused double billing.
@@ -675,16 +672,44 @@ def test_a_credential_in_the_script_never_reaches_a_prompt(tmp_path):
     assert all("<redacted>" not in entry.import_dir for entry in manifest.entries)
 
 
-def test_a_clean_script_is_untouched_by_the_credential_filter(tmp_path):
-    """Redaction must be the identity for ordinary content.
+def test_ordinary_words_the_filter_dislikes_do_not_corrupt_narration(tmp_path):
+    """``budget.redact`` is a greedy summary filter, not a content sanitizer.
 
-    Otherwise the lossless-narration guarantee would quietly depend on the
-    filter never firing, which is not something a test elsewhere would catch.
+    Measured: it rewrites the ordinary sentence ``token economy 正在改變創作者
+    的收入結構`` to ``<redacted> 正在改變創作者的收入結構``. Narration must not go
+    through it — the voice stage has to speak this text — so the prompt line is
+    withheld instead while the narration stays exact.
     """
+    ordinary = script_with_body(5).model_copy(
+        update={
+            "hook": "token economy 正在改變創作者的收入結構，先講結論。",
+            "conclusion": "先講 session 管理，再講快取策略，這樣才排得動。",
+        }
+    )
+
+    _, _, scenes = planned(tmp_path, ordinary)
+
+    assert "".join(scene.narration for scene in scenes) == "".join(
+        [
+            ordinary.hook,
+            *ordinary.body,
+            ordinary.conclusion,
+            ordinary.cta,
+        ]
+    )
+    assert all("<redacted>" not in scene.narration for scene in scenes)
+    # The prompts for those scenes withhold the line rather than mangle it.
+    withheld = [scene for scene in scenes if "略去" in scene.visual_prompt]
+    assert withheld
+    assert all("<redacted>" not in scene.visual_prompt for scene in withheld)
+
+
+def test_a_clean_script_keeps_its_narration_in_every_prompt(tmp_path):
+    """Nothing is withheld when no field trips the filter."""
     script = script_with_body(5)
     _, _, scenes = planned(tmp_path, script)
 
-    assert all("<redacted>" not in scene.narration for scene in scenes)
+    assert all("略去" not in scene.visual_prompt for scene in scenes)
     assert all("<redacted>" not in scene.visual_prompt for scene in scenes)
     assert "".join(scene.narration for scene in scenes) == "".join(
         [script.hook, *script.body, script.conclusion, script.cta]

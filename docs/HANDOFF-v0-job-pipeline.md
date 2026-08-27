@@ -29,7 +29,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 | `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 
-測試基準（2026-08-28 實測）：**1413 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1414 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 （前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
@@ -38,7 +38,7 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1413 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1414 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -128,7 +128,12 @@ plan_scenes(job, store)            # 8~10 個 Scene + 匯入目錄 + generation_
 - **兩者都重讀 store**，不信任傳進來的 `ContentJob`。傳一個過期的物件不會重跑一個階段，會拿到 `ScenePlanError`。
 - **`plan_scenes` 完全不呼叫 provider、不動預算。** 輸出是 Script 與 job 上限的純函式，同一份 script 永遠規劃出同一組 scene —— 這是需求不是巧合：重跑若洗牌，人工已經照舊 manifest 生好的素材就對不上了。
 - **冪等但會補寫，而且「已有 scenes」不等於「規劃完成」。** 因為規劃是純函式，job 還在 `SCENE_PLANNING` 時 `plan_scenes` 會**重算整份計畫並逐項比對**磁碟上的 scene；相符才短路，不符就重建。**只數檔案不夠** —— 一個 10 場景計畫崩到剩 8 個檔案，數量本身完全合理。過了 `SCENE_PLANNING` 之後計畫凍結、不再重算，但仍會檢查結構不變式（8~10、`scene_index` 連續、id 唯一、歸屬相符）；壞掉就報錯，不會拿殘骸去產一份只有一個 entry 的 manifest。匯入目錄每次補齊；**manifest 每次都跟 scene 逐欄比對**（只豁免 `created_at`），不一致就重寫 —— 不是比對「這次有沒有重建」，因為 scene 寫完、manifest 還沒寫就崩的話，下一次看到的 scene 已經跟腳本一致了。
-- **Script 的每個欄位在切分「之前」整段過 `budget.redact()`。** PRD-001 FR-004A 與 SPEC-001 §12 / §14 用同一句話寫死：`secret、credential 不得寫入 log、audit 摘要或 prompt`。Script 是模型從使用者主題產生的文字，夾帶憑證是真的會發生。**順序是關鍵**：切完再逐片過濾不等價 —— `api_key=sk-x，<token>` 從逗號切開後，前半仍像 `key=value` 會被抓，後半只剩裸 token 就漏掉了。整段先過，narration／caption／prompt 一次全乾淨（有測試用逗號分隔的憑證釘住）。**識別碼不過濾**：`scene_id`、`import_dir` 是本地產生的，這個 repo 已經因為把識別碼丟進憑證過濾器而炸過一次（job id 含 `session` → idempotency key 變 `<redacted>` → 重複計費）。乾淨腳本下 `redact` 是恆等函式，所以 narration 仍然能無損拼回原腳本（也有測試釘住）。
+- **憑證只從 prompt 擋，不動 narration。** PRD-001 FR-004A 與 SPEC-001 §12 / §14 用同一句話寫死：`secret、credential 不得寫入 log、audit 摘要或 prompt`。Script 是模型從使用者主題產生的文字，夾帶憑證是真的會發生。做法分兩種，因為欄位性質不同：
+  - `title` / `core_message` 是**整段引用**，所以直接 `budget.redact()`，精確。
+  - narration 是**欄位的切片**，改成在切分前用 `redact` 去**測**整個來源欄位，把「可疑」旗標帶到每個切片上；可疑的切片，prompt **整句略去**而不是改寫。理由是實測：`api_key=sk-x,abcdefghijklmnopqrst` 用 ASCII 逗號切開後會變成 `<redacted>` 加上一個**沒有任何 pattern 抓得到的裸 token**。逐片過濾擋不住，測整段才擋得住。
+  - **`Scene.narration` 永遠是原文。** `budget.redact` 是為 provider 摘要設計的貪婪過濾器，實測會把 `token economy 正在改變創作者的收入結構` 整句吃成 `<redacted> 正在改變...`、把 `先講 session 管理，再講快取` 吃成 `先講 <redacted>`。narration 是 voice 階段要念的字，過濾它等於毀掉合法腳本 —— 這跟當年把 idempotency key 過濾掉是同一個錯誤。有測試同時釘住「憑證不進 prompt」與「合法英文字不毀 narration」兩邊。
+  - **識別碼不過濾**：`scene_id`、`import_dir` 是本地產生的。
+  - 代價：腳本正常提到 `token`／`session`／`key` 等字時，那些場景的 prompt 會少掉旁白那一句（換成一句說明，請人確認是不是誤判）。這是**保守側的誤判**，不是漏擋。要降低誤判率就得寫一支專屬的 sanitizer，那超出 #5 範圍。
 - **`plan_scenes` 不會把「已停在 `MANUAL_ACTION_REQUIRED` 的舊計畫」交回去。** `_FROZEN_PLAN_STATUSES` 只列規劃成功之後的階段，不含失敗／人工／預算／取消狀態；被 park 的 job 帶著舊 scenes 再呼叫會直接報錯，而不是若無其事重發一份 manifest 把該狀態蓋掉。
 - **manifest 的 `accepted_mime_types` 每種副檔名只列一個 MIME。** SPEC §7 是「MIME sniffing 與副檔名雙重驗證」，所以不能一邊要求檔名 `scene-001.png`、一邊宣告接受 `image/jpeg` —— 那是叫操作者產出匯入階段會拒收的檔案。要放寬就得連檔名規則一起放寬。
 - **改 `script.json` 再跑 `plan_scenes` 就是 replan**（前提是 job 還在 `SCENE_PLANNING`）：scene 與 manifest 一起換新。**但已經人工匯入的素材不會被動**，而 scene id 會被重用 —— 也就是說 `scenes/scene-003/images/` 裡的舊圖會留在原地，卻對應到新的 narration。改稿重跑之後要自己清或重生受影響的素材。issue #8 接匯入驗證時要考慮這件事。
