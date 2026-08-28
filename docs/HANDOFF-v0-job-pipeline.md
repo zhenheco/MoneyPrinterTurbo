@@ -35,7 +35,7 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 | `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
 | `app/services/jobs/captions.py` | issue #7：由時間軸產 `subtitles/captions.srt` + `captions.json` |
 
-測試基準（2026-08-28 實測）：**1512 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1521 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 
 
 ## 2. 驗證現況（接手第一件事）
@@ -44,7 +44,7 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1512 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1521 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -207,7 +207,9 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 - **`utils.text_to_srt` / `time_convert_seconds_to_hmsm` 也不能用。** 實測：吃 float 秒、**會截斷**（8123ms → `00:00:08,122`）、每個 block 尾端多 8 個空格、負值沒防呆（-3 秒 → `-1:59:57,000`）。`captions.srt_timestamp()` 用整數 divmod 自己算，四行。
 - **一個 scene 一條字幕**，文字是 `scene.narration` 逐字。**不要一個 timeline segment 一條** —— edge 路徑的 segment 是**詞邊界**，那會產出一個字一條的中文字幕，而且 `caption_ref` 無法跟 scene 保持 1:1（兩份凍結 render manifest 都釘死 `caption-001..00N` 對 scene）。
 - **必須夾上限，這不是防禦性寫法。** `voice_adapter.synthesize` 容許 25% 漂移後把 `total_duration_ms` 設成**實測值**，所以 `segments[-1].end_ms` 合法地可能超過它。不夾的話，「字幕不超出 voice 長度」會在一個完全正常的 take 上失敗。
-- scene 邊界怎麼推：timeline **沒有 scene_id**（`narration_text` 是無分隔字串拼接），所以先按旁白**字元比例**算邊界，再在不破壞單調性的前提下**吸附到真實 segment 起點**。segment 數少於 scene 數時吸附不了就用比例值 —— 吸附是改良，不是必要條件。
+- scene 邊界怎麼推：timeline **沒有 scene_id**（`narration_text` 是無分隔字串拼接），所以先按旁白**字元比例**算邊界，再**在半個相鄰間距以內**吸附到真實 segment 起點。**那個距離上限是重點** —— Edge 路徑的 segment 是詞邊界、最近的一個只差幾毫秒，吸附確實改善；但其他所有 provider 的 segment 是**子句級**，最近的子句起點可能在幾秒外，硬吸過去等於把這個 scene 的字元佔比換成那個子句的佔比，沒有增加任何資訊只是把邊界搬走。無上限版本用真實鏈路 fuzz 3000 份腳本，最壞把邊界搬了 10.25 秒、讓一個 26 字的 scene 只在畫面上停 36 毫秒。
+- **cue 文字會做行正規化。** 空行在 SubRip 裡是 cue 分隔符，所以旁白裡夾一個空行會讓那一條字幕**提早截斷** —— 讀取端只拿到前半，而同一個 stage 寫的 `captions.json` 仍然完整，兩份檔案自相矛盾，AssetRecord 的 sha256 還會把壞掉的位元組認證成好的。`Scene.narration` 是 LLM 來的未驗證字串，`scene_planner._sentences` 只 strip 外圍空白，所以「兩段式開場白」會原樣抵達這裡。`_cue_body()` 逐行 strip 並丟掉空行（`splitlines` 一次涵蓋 `\n` / `\r` / `\r\n` 與 vertical-tab 家族）。
+- **SRT 結尾一定有一個空行。** 好幾種 SubRip 讀取器（含 moviepy 的 `file_to_subtitles`，也就是 #9 會餵這個檔的那個）只在遇到空行時才把手上那條 cue 收下，少了它就**丟掉最後一條**。
 - **`voice_duration_source` 原樣傳進 `captions.json`**：`"timeline"` 代表上限只是 provider 自報、沒被解碼證實。#7 **不硬停**（跟 #6 一致：記錄而非拒絕），但 #9 的 ffprobe QA 要據此區分「已證實」與「僅宣稱」。
 - **#7 不改狀態、成功路徑不寫 decision、不寫 ProviderEvent／ledger、不過預算閘門。** `AWAITING_ASSETS → READY_TO_RENDER` 是 #8 的邊。只有非可重試失敗才 park 進 `MANUAL_ACTION_REQUIRED`。
 - **`asset_type` 是 `"subtitle"` 不是 `"audio"`。** #6 用 `asset_type == "audio"` 當唯一性鍵，寫錯會讓之後每次 `generate_master_voice` 都報「job carries 2 voice assets」。

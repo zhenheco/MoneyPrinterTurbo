@@ -124,9 +124,47 @@ def test_render_srt_has_no_trailing_whitespace():
         "1\n00:00:00,000 --> 00:00:01,500\n第一句。\n"
         "\n"
         "2\n00:00:01,500 --> 00:00:03,000\n第二句。\n"
+        "\n"
     )
     for line in text.split("\n"):
         assert line == line.rstrip(), f"trailing whitespace: {line!r}"
+
+
+def test_render_srt_ends_with_a_blank_line_after_the_last_cue():
+    """Several readers flush the cue they are accumulating only on a blank
+    line, and drop the final one without it. moviepy's file_to_subtitles is
+    one, and issue #9 feeds this file straight to it."""
+    text = render_srt([CaptionCue(1, "caption-001", "scene-001", 1, "只有一句。", 0, 900)])
+
+    assert text.endswith("只有一句。\n\n")
+    assert text.count("\n") == 4
+
+
+@pytest.mark.parametrize(
+    "narration,expected",
+    [
+        ("上半句。\n\n下半句。", "上半句。\n下半句。"),
+        ("上半句。\r\n\r\n下半句。", "上半句。\n下半句。"),
+        ("  前後有空白  ", "前後有空白"),
+        ("尾端有空格 \n下一行", "尾端有空格\n下一行"),
+        ("中間\r夾一個 CR", "中間\n夾一個 CR"),
+    ],
+)
+def test_a_blank_line_inside_a_cue_cannot_truncate_the_block(narration, expected):
+    """A blank line is what separates cues, so one inside a cue's text ends
+    the block early — the reader keeps what came before it and discards the
+    rest, while captions.json still carries the whole narration."""
+    text = render_srt([CaptionCue(1, "caption-001", "scene-001", 1, narration, 0, 900)])
+
+    assert text == f"1\n00:00:00,000 --> 00:00:00,900\n{expected}\n\n"
+    assert parse_srt(text) == [
+        {"index": 1, "start_ms": 0, "end_ms": 900, "text": expected}
+    ]
+
+
+def test_a_cue_whose_text_is_only_whitespace_is_refused():
+    with pytest.raises(CaptionsError, match="no text"):
+        render_srt([CaptionCue(1, "caption-001", "scene-001", 1, " \n\n ", 0, 900)])
 
 
 def test_caption_ref_matches_the_frozen_render_manifests():
@@ -284,6 +322,81 @@ def test_a_legal_overrunning_timeline_is_clamped(tmp_path):
 
     assert cues[-1].end_ms == 3000
     assert all(cue.end_ms <= 3000 for cue in cues)
+
+
+def test_an_edge_close_to_a_real_boundary_snaps_onto_it(tmp_path):
+    """Snapping is the whole reason segment starts are consulted at all.
+
+    The narration lengths are chosen so the proportional estimate lands *near*
+    the real boundaries but not on them — 22/19/19 characters over 3000 ms puts
+    the raw edges at 1100 and 2050, while the provider reported 1000 and 2000.
+    An equal-length fixture would not distinguish snapping from not snapping.
+    """
+    store, job = seeded(tmp_path)
+    scenes = store.load(job.content_job_id).scenes
+    uneven = [
+        scenes[0].model_copy(update={"narration": "甲" * 22}),
+        scenes[1].model_copy(update={"narration": "乙" * 19}),
+        scenes[2].model_copy(update={"narration": "丙" * 19}),
+    ]
+    timeline = _timeline(
+        total=3000,
+        segments=[
+            {"index": 1, "text": "a", "start_ms": 0, "end_ms": 1000},
+            {"index": 2, "text": "b", "start_ms": 1000, "end_ms": 2000},
+            {"index": 3, "text": "c", "start_ms": 2000, "end_ms": 3000},
+        ],
+    )
+
+    cues = scene_cues(scenes=uneven, timeline=timeline)
+
+    # Raw proportional edges would be 1100 and 2050; both snap onto the word
+    # boundaries the provider actually reported.
+    assert [(c.start_ms, c.end_ms) for c in cues] == [
+        (0, 1000),
+        (1000, 2000),
+        (2000, 3000),
+    ]
+
+
+def test_a_distant_segment_start_does_not_drag_an_edge_across_the_script(tmp_path):
+    """The snap is a nudge, not an override.
+
+    Every non-Edge provider produces clause-level segments, so the nearest
+    segment start can be seconds from where a scene's share of the narration
+    actually falls. Taking it anyway swaps the scene's share for the clause's,
+    which adds no information — fuzzed over realistic scripts it displaced an
+    edge by 10.25 s and left a 26-character scene on screen for 36 ms.
+    """
+    store, job = seeded(tmp_path)
+    base = store.load(job.content_job_id).scenes
+    lopsided = [
+        base[0].model_copy(update={"narration": "短。"}),
+        base[1].model_copy(update={"narration": "這一段非常長" * 20}),
+        base[2].model_copy(update={"narration": "也很短。"}),
+    ]
+    # One clause boundary parked far from every proportional edge.
+    timeline = _timeline(
+        total=60_000,
+        segments=[
+            {"index": 1, "text": "a", "start_ms": 0, "end_ms": 30_000},
+            {"index": 2, "text": "b", "start_ms": 30_000, "end_ms": 60_000},
+        ],
+    )
+
+    cues = scene_cues(scenes=lopsided, timeline=timeline)
+
+    proportional = []
+    lengths = [len(scene.narration) for scene in lopsided]
+    total = sum(lengths)
+    consumed = 0
+    for length in lengths[:-1]:
+        consumed += length
+        proportional.append(round(consumed / total * 60_000))
+    for cue, estimate in zip(cues[1:], proportional):
+        # Within half the smaller adjacent gap — a nudge, not a relocation.
+        assert abs(cue.start_ms - estimate) < 15_000
+    assert all(cue.end_ms - cue.start_ms > 0 for cue in cues)
 
 
 def test_a_voice_too_short_for_the_scenes_is_refused(tmp_path):

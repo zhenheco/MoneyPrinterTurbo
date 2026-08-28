@@ -470,6 +470,17 @@ class JobStore:
             )
         return f"{SUBTITLES_DIR}/{CAPTIONS_STEM}{extension}"
 
+    def captions_srt_path(self, job_id: str) -> Path:
+        """The Master subtitle track's path, proven to sit inside the root.
+
+        Read-side companion to :meth:`write_captions_srt`. Creates nothing —
+        callers checking whether the track survived must not resolve the
+        recorded ``storage_key`` themselves, or a symlinked ``subtitles/``
+        would be followed out of the store.
+        """
+        job_dir = self._job_dir(job_id)
+        return self._within_root(job_dir / CAPTIONS_SRT_FILE)
+
     def write_captions_srt(self, job_id: str, text: str) -> Path:
         """Write ``subtitles/captions.srt`` atomically.
 
