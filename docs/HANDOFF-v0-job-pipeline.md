@@ -12,7 +12,9 @@ V0 job pipeline 的相關合併：
 | #6 | `864963e` | issue #4：建立 Job + Script JSON 生成 |
 | #7 | `ac8b15b` | 修復 issue #4 交付時未被發現的破口（見 §3，**這一條最重要**） |
 | #8 | `084aa0d` | 上一版 handoff |
-| 本次 | — | issue #5：Scene Planner + Generation Manifest |
+| #9 | `82abd8a` | issue #5：Scene Planner + Generation Manifest |
+| #10 | `414c6fc` | CI：Windows smoke 納入 job pipeline 測試 |
+| 本次 | — | issue #6：Master Voice + 時間軸 |
 
 PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
 
@@ -46,7 +48,7 @@ git log origin/main -1 --oneline
 
 **注意本地 checkout 可能落後或分歧。** 這在這台開發機上已經發生過兩次：本地 `main` 落後 origin 好幾個 commit，且帶著一個從未推上去的舊 handoff commit（`b5a411a`）。先 `git status` 與 `git log origin/main..HEAD` 確認，再決定 pull 或 reset。
 
-CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13 + Windows smoke。**Windows smoke 是逐檔列舉測試，目前沒有納入任何 job pipeline 測試**，而 `store.py` 正是全 repo 最吃 Windows 路徑語義的檔案。CI 也**沒有型別檢查**。
+CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13（含 redis service，跑全套）+ Windows smoke。Windows smoke 是**逐檔列舉**的，PR #10 之後納入了 7 個 job pipeline 測試檔（812 tests，實測全綠 —— 所以 `store.py` 沒有 POSIX-only 假設）。**新增 job pipeline 測試檔時要記得加進那份清單**，否則它不會在 Windows 上跑。需要 ffmpeg 的測試不要加（Windows runner 不保證有）。CI 仍然**沒有型別檢查**。
 
 ## 3. ⚠️ 最重要的一課：`llm.generate_script` 會摧毀 JSON
 
