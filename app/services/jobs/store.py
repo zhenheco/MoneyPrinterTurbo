@@ -10,6 +10,8 @@ truth (PLAN-001 Q1). Layout::
         assets/assets.jsonl
         scenes/<scene_id>/images/        <- where a human drops generated stills
         scenes/<scene_id>/videos/        <- and generated clips (SPEC-001 3.2)
+        audio/master-voice.mp3           <- the one Master Voice (SPEC-001 3.2)
+        audio/master-voice-timestamps.json
         provider_events.jsonl
         usage_ledger.jsonl
         decisions.jsonl
@@ -27,11 +29,12 @@ Single-file writes go through ``os.replace`` so a crash never leaves a
 half-written JSON document. The ``.jsonl`` files are append-only: neither
 ``save`` nor ``replace`` rewrites them.
 
-``generation_manifest.json`` and the ``scenes/<scene_id>/<kind>/`` directories
-are scene-planner owned and deliberately *outside* the :class:`JobRecord`
-document set, so ``replace`` can never delete them — those directories may hold
-files a human placed there by hand. Use
-:meth:`JobStore.write_generation_manifest` and :meth:`JobStore.scene_media_dir`.
+``generation_manifest.json``, the ``scenes/<scene_id>/<kind>/`` directories and
+everything under ``audio/`` are stage-owned and deliberately *outside* the
+:class:`JobRecord` document set, so ``replace`` can never delete them — those
+directories hold files a human placed there by hand, or bytes that cost money
+to synthesise. Use :meth:`JobStore.write_generation_manifest`,
+:meth:`JobStore.scene_media_dir` and :meth:`JobStore.master_voice_path`.
 
 Every path a read or write touches is resolved with ``os.path.realpath`` and
 proven to sit under the store root before it is opened, so a symlinked job
@@ -78,6 +81,14 @@ ASSETS_FILE = os.path.join("assets", "assets.jsonl")
 #: caller asks for are created; an unlisted name is refused rather than turned
 #: into an arbitrary directory under the job.
 SCENE_MEDIA_KINDS = frozenset({"images", "videos", "references", "qa"})
+#: SPEC-001 3.2 puts the Master Voice at the job root, not under a scene: one
+#: job has exactly one of it (6.3, FR-004A), so it is not per-scene media and
+#: deliberately does not go through ``scene_media_dir``.
+AUDIO_DIR = "audio"
+MASTER_VOICE_STEM = "master-voice"
+MASTER_VOICE_TIMESTAMPS_FILE = os.path.join(AUDIO_DIR, "master-voice-timestamps.json")
+#: A file extension, not a path segment: no separators, no dots beyond the one.
+_EXTENSION_PATTERN = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
 PROVIDER_EVENTS_FILE = "provider_events.jsonl"
 USAGE_LEDGER_FILE = "usage_ledger.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
@@ -373,6 +384,71 @@ class JobStore:
         """
         self._require_scene_media(scene_id, kind)
         return f"{Path(SCENES_DIR).as_posix()}/{scene_id}/{kind}"
+
+    def master_voice_path(self, job_id: str, extension: str) -> Path:
+        """Create ``audio/`` idempotently and return the Master Voice path.
+
+        The file itself is not created — the TTS provider writes it. Creation
+        only, never deletion: these bytes cost a provider call to produce.
+        """
+        if not isinstance(extension, str) or not _EXTENSION_PATTERN.fullmatch(extension):
+            raise JobStoreError(
+                f"master voice extension must look like '.mp3': {extension!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        audio_dir = job_dir / AUDIO_DIR
+        self._within_root(audio_dir)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        # Re-checked after the mkdir: a symlinked ``audio`` would have been
+        # followed by ``parents=True`` and is only visible now.
+        self._within_root(audio_dir)
+        return self._within_root(audio_dir / f"{MASTER_VOICE_STEM}{extension}")
+
+    def master_voice_relative_path(self, extension: str) -> str:
+        """The value written to ``AssetRecord.storage_key``.
+
+        Job-dir-relative and POSIX-separated, for the same reason
+        :meth:`scene_media_relative_dir` is: a job tree gets moved and shared.
+        Validated identically, because this string is persisted even though
+        nothing is created here.
+        """
+        if not isinstance(extension, str) or not _EXTENSION_PATTERN.fullmatch(extension):
+            raise JobStoreError(
+                f"master voice extension must look like '.mp3': {extension!r}"
+            )
+        return f"{AUDIO_DIR}/{MASTER_VOICE_STEM}{extension}"
+
+    def write_master_voice_timestamps(
+        self, job_id: str, timeline: Mapping[str, Any]
+    ) -> Path:
+        """Write ``audio/master-voice-timestamps.json`` atomically."""
+        if not isinstance(timeline, Mapping):
+            raise JobStoreError("master voice timeline must be a mapping")
+        if timeline.get("content_job_id") != job_id:
+            raise JobStoreError(
+                f"master voice timeline belongs to "
+                f"{timeline.get('content_job_id')!r}, not to {job_id!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        path = job_dir / MASTER_VOICE_TIMESTAMPS_FILE
+        self._write_guarded(
+            path, json.dumps(dict(timeline), ensure_ascii=False, indent=2)
+        )
+        return path
+
+    def read_master_voice_timestamps(self, job_id: str) -> Optional[dict]:
+        """The parsed timeline document, or ``None`` when none was written."""
+        job_dir = self._job_dir(job_id)
+        path = self._within_root(job_dir / MASTER_VOICE_TIMESTAMPS_FILE)
+        if not path.is_file():
+            return None
+        payload = _read_json(path, MASTER_VOICE_TIMESTAMPS_FILE)
+        if not isinstance(payload, dict):
+            raise JobStoreError(
+                f"{MASTER_VOICE_TIMESTAMPS_FILE} is not a JSON object: "
+                f"{type(payload).__name__}"
+            )
+        return payload
 
     def write_generation_manifest(
         self, job_id: str, manifest: GenerationManifest
