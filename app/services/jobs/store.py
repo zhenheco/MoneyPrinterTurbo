@@ -12,6 +12,8 @@ truth (PLAN-001 Q1). Layout::
         scenes/<scene_id>/videos/        <- and generated clips (SPEC-001 3.2)
         audio/master-voice.mp3           <- the one Master Voice (SPEC-001 3.2)
         audio/master-voice-timestamps.json
+        subtitles/captions.srt           <- the subtitle track (SPEC-001 3.2)
+        subtitles/captions.json
         provider_events.jsonl
         usage_ledger.jsonl
         decisions.jsonl
@@ -87,6 +89,11 @@ SCENE_MEDIA_KINDS = frozenset({"images", "videos", "references", "qa"})
 AUDIO_DIR = "audio"
 MASTER_VOICE_STEM = "master-voice"
 MASTER_VOICE_TIMESTAMPS_FILE = os.path.join(AUDIO_DIR, "master-voice-timestamps.json")
+#: SPEC-001 3.2 again: the subtitle track is one per job, beside the audio.
+SUBTITLES_DIR = "subtitles"
+CAPTIONS_STEM = "captions"
+CAPTIONS_SRT_FILE = os.path.join(SUBTITLES_DIR, "captions.srt")
+CAPTIONS_DOCUMENT_FILE = os.path.join(SUBTITLES_DIR, "captions.json")
 #: A file extension, not a path segment: no separators, no dots beyond the one.
 _EXTENSION_PATTERN = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
 PROVIDER_EVENTS_FILE = "provider_events.jsonl"
@@ -446,6 +453,77 @@ class JobStore:
         if not isinstance(payload, dict):
             raise JobStoreError(
                 f"{MASTER_VOICE_TIMESTAMPS_FILE} is not a JSON object: "
+                f"{type(payload).__name__}"
+            )
+        return payload
+
+    def captions_relative_path(self, extension: str) -> str:
+        """The value written to the subtitle ``AssetRecord.storage_key``.
+
+        Job-dir-relative and POSIX-separated, like
+        :meth:`master_voice_relative_path`, and validated the same way even
+        though nothing is created here — this string is persisted.
+        """
+        if not isinstance(extension, str) or not _EXTENSION_PATTERN.fullmatch(extension):
+            raise JobStoreError(
+                f"captions extension must look like '.srt': {extension!r}"
+            )
+        return f"{SUBTITLES_DIR}/{CAPTIONS_STEM}{extension}"
+
+    def captions_srt_path(self, job_id: str) -> Path:
+        """The Master subtitle track's path, proven to sit inside the root.
+
+        Read-side companion to :meth:`write_captions_srt`. Creates nothing —
+        callers checking whether the track survived must not resolve the
+        recorded ``storage_key`` themselves, or a symlinked ``subtitles/``
+        would be followed out of the store.
+        """
+        job_dir = self._job_dir(job_id)
+        return self._within_root(job_dir / CAPTIONS_SRT_FILE)
+
+    def write_captions_srt(self, job_id: str, text: str) -> Path:
+        """Write ``subtitles/captions.srt`` atomically.
+
+        No mkdir-first helper for this one: ``_write_guarded`` runs
+        ``_within_root`` *before* ``_write_atomic`` creates the parents, so a
+        symlinked ``subtitles/`` is caught without the post-mkdir re-check
+        :meth:`master_voice_path` needs.
+        """
+        if not isinstance(text, str) or not text.strip():
+            raise JobStoreError("captions.srt must be non-empty text")
+        job_dir = self._job_dir(job_id)
+        path = job_dir / CAPTIONS_SRT_FILE
+        self._write_guarded(path, text)
+        return path
+
+    def write_captions_document(
+        self, job_id: str, document: Mapping[str, Any]
+    ) -> Path:
+        """Write ``subtitles/captions.json`` atomically."""
+        if not isinstance(document, Mapping):
+            raise JobStoreError("captions document must be a mapping")
+        if document.get("content_job_id") != job_id:
+            raise JobStoreError(
+                f"captions document belongs to {document.get('content_job_id')!r}, "
+                f"not to {job_id!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        path = job_dir / CAPTIONS_DOCUMENT_FILE
+        self._write_guarded(
+            path, json.dumps(dict(document), ensure_ascii=False, indent=2)
+        )
+        return path
+
+    def read_captions_document(self, job_id: str) -> Optional[dict]:
+        """The parsed captions document, or ``None`` when none was written."""
+        job_dir = self._job_dir(job_id)
+        path = self._within_root(job_dir / CAPTIONS_DOCUMENT_FILE)
+        if not path.is_file():
+            return None
+        payload = _read_json(path, CAPTIONS_DOCUMENT_FILE)
+        if not isinstance(payload, dict):
+            raise JobStoreError(
+                f"{CAPTIONS_DOCUMENT_FILE} is not a JSON object: "
                 f"{type(payload).__name__}"
             )
         return payload

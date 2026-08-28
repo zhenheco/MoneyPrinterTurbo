@@ -14,9 +14,10 @@ V0 job pipeline 的相關合併：
 | #8 | `084aa0d` | 上一版 handoff |
 | #9 | `82abd8a` | issue #5：Scene Planner + Generation Manifest |
 | #10 | `414c6fc` | CI：Windows smoke 納入 job pipeline 測試 |
-| 本次 | — | issue #6：Master Voice + 時間軸 |
+| #11 | `f407192` | issue #6：Master Voice + 時間軸 |
+| 本次 | — | issue #7：由時間軸產字幕 |
 
-PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
+PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 
 全部落在平行路徑 `app/services/jobs/`，**`app/services/task.py` 至今零修改**（上游熱區，侵入式修改會讓每次 merge upstream 都衝突 —— 見 PLAN-001 Q2）。
 
@@ -32,9 +33,10 @@ PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 | `app/services/jobs/master_voice.py` | issue #6：`start_voice_generating` / `generate_master_voice` + 時間軸文件 |
 | `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
+| `app/services/jobs/captions.py` | issue #7：由時間軸產 `subtitles/captions.srt` + `captions.json` |
 
-測試基準（2026-08-28 實測）：**1458 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
-（前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
+測試基準（2026-08-28 實測）：**1521 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+
 
 ## 2. 驗證現況（接手第一件事）
 
@@ -42,7 +44,7 @@ PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1458 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1521 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -195,6 +197,23 @@ generate_master_voice(job, store)    # 一次 TTS -> audio/ + 時間軸 + AssetR
 - **語音選擇看 `job.language`**（`zh-TW` 會拿到台灣配音，不是大陸配音），`config.app["voice_name"]` 覆寫它。SPEC §3.1 的請求契約沒有語音欄位、`ContentJob` 又是 `extra="forbid"`，所以 job 目前帶不了自己的語音設定 —— 見 §7。
 - **合成語音的 consent 欄位**：`consent_status="not_applicable"`、`manual_review_status="not_required"`、`license_or_consent="synthetic_tts_no_creator_reference"`。SPEC §6.3 的同意規範管的是「引用真人聲音」，這條路徑不 clone 也不模仿任何人；FR-005 的 preflight 同樣明文只針對真人 voice/avatar。**#8 要把這個範圍寫死**，否則合成語音會卡在一個為真人設計的人工審核閘門上。
 
+字幕（issue #7）：
+
+```python
+generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
+```
+
+- **PLAN row 7 括號裡的「沿用 subtitle.py」是錯的機制，不要照做。** 實測三件事：`subtitle.create()` 是 faster-whisper **ASR**，缺套件回 `""`、**成功與失敗都回 `None`**、空轉錄時寫一個 1 byte 的 `"\n"` 檔還記 log 說建立成功；`subtitle.correct()` 餵空 SRT 會**捏造**一行 `00:00:00,000 --> 00:00:00,000` 給每個腳本句，然後通過舊 pipeline 唯一的檢查；`voice.create_subtitle()` 需要 `voice_adapter` 已經丟掉的 `SubMaker`，而且講 100 奈秒 tick。row 7 自己的 scope 條文「由 master voice timestamps 產」才是對的路徑。
+- **`utils.text_to_srt` / `time_convert_seconds_to_hmsm` 也不能用。** 實測：吃 float 秒、**會截斷**（8123ms → `00:00:08,122`）、每個 block 尾端多 8 個空格、負值沒防呆（-3 秒 → `-1:59:57,000`）。`captions.srt_timestamp()` 用整數 divmod 自己算，四行。
+- **一個 scene 一條字幕**，文字是 `scene.narration` 逐字。**不要一個 timeline segment 一條** —— edge 路徑的 segment 是**詞邊界**，那會產出一個字一條的中文字幕，而且 `caption_ref` 無法跟 scene 保持 1:1（兩份凍結 render manifest 都釘死 `caption-001..00N` 對 scene）。
+- **必須夾上限，這不是防禦性寫法。** `voice_adapter.synthesize` 容許 25% 漂移後把 `total_duration_ms` 設成**實測值**，所以 `segments[-1].end_ms` 合法地可能超過它。不夾的話，「字幕不超出 voice 長度」會在一個完全正常的 take 上失敗。
+- scene 邊界怎麼推：timeline **沒有 scene_id**（`narration_text` 是無分隔字串拼接），所以先按旁白**字元比例**算邊界，再**在半個相鄰間距以內**吸附到真實 segment 起點。**那個距離上限是重點** —— Edge 路徑的 segment 是詞邊界、最近的一個只差幾毫秒，吸附確實改善；但其他所有 provider 的 segment 是**子句級**，最近的子句起點可能在幾秒外，硬吸過去等於把這個 scene 的字元佔比換成那個子句的佔比，沒有增加任何資訊只是把邊界搬走。無上限版本用真實鏈路 fuzz 3000 份腳本，最壞把邊界搬了 10.25 秒、讓一個 26 字的 scene 只在畫面上停 36 毫秒。
+- **cue 文字會做行正規化。** 空行在 SubRip 裡是 cue 分隔符，所以旁白裡夾一個空行會讓那一條字幕**提早截斷** —— 讀取端只拿到前半，而同一個 stage 寫的 `captions.json` 仍然完整，兩份檔案自相矛盾，AssetRecord 的 sha256 還會把壞掉的位元組認證成好的。`Scene.narration` 是 LLM 來的未驗證字串，`scene_planner._sentences` 只 strip 外圍空白，所以「兩段式開場白」會原樣抵達這裡。`_cue_body()` 逐行 strip 並丟掉空行（`splitlines` 一次涵蓋 `\n` / `\r` / `\r\n` 與 vertical-tab 家族）。
+- **SRT 結尾一定有一個空行。** 好幾種 SubRip 讀取器（含 moviepy 的 `file_to_subtitles`，也就是 #9 會餵這個檔的那個）只在遇到空行時才把手上那條 cue 收下，少了它就**丟掉最後一條**。
+- **`voice_duration_source` 原樣傳進 `captions.json`**：`"timeline"` 代表上限只是 provider 自報、沒被解碼證實。#7 **不硬停**（跟 #6 一致：記錄而非拒絕），但 #9 的 ffprobe QA 要據此區分「已證實」與「僅宣稱」。
+- **#7 不改狀態、成功路徑不寫 decision、不寫 ProviderEvent／ledger、不過預算閘門。** `AWAITING_ASSETS → READY_TO_RENDER` 是 #8 的邊。只有非可重試失敗才 park 進 `MANUAL_ACTION_REQUIRED`。
+- **`asset_type` 是 `"subtitle"` 不是 `"audio"`。** #6 用 `asset_type == "audio"` 當唯一性鍵，寫錯會讓之後每次 `generate_master_voice` 都報「job carries 2 voice assets」。
+
 凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。另外，**這兩組 fixture 的 `scenes/` 是手寫的，不是 planner 產出的** —— 拿它們的 script 跑 `plan_scenes` 都會得到 8 個 scene，而 `ten-scene-demo` 的目錄裡是 10 個。不要把兩者當成同一回事。
 
 ## 5. 需要人拍板的規格缺口（擋 issue #11）
@@ -216,7 +235,6 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 
 | # | 標題 | 大小 | 卡在哪 |
 |---|---|---|---|
-| 7 | 字幕生成 | S | **無阻塞，可立刻開工**（#6 已完成） |
 | 8 | Asset Import + Creator Profile preflight | L | **無阻塞**（#5 已完成） |
 | 9 | Render Manifest + Renderer + ffprobe QA | L | 依賴 #6 #7 #8 |
 | 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部 + §5 的規格缺口 |
@@ -245,6 +263,8 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 - **`create_job` 把 `creator_profile_id` 硬填空字串**，而 SPEC §3.1 的輸入契約根本沒有這個欄位。每個 V0 job 都無法連回 consent 記錄。**這條先前寫「擋到 #6」，實測不成立** —— #6 合成的是 TTS，不引用任何真人聲音，所以不需要 creator profile（見 §4 的 consent 欄位）。它仍然擋 #8 / #9 的**真人素材**路徑。
 - **job 帶不了自己的語音設定。** SPEC §3.1 的請求契約沒有語音欄位，`ContentJob` 是 `extra="forbid"`，而 repo 裡唯一的 `voice_name` 設定住在 `[ui]`（WebUI 自己的偏好儲存）。#6 因此讀 `config.app["voice_name"]`、否則依 `job.language` 選一個。**同一台機器上跑兩個不同語言的 job 會共用同一個設定值**，這在接 CLI/API 層時要解決。
 - **音檔容器是寫死的 `.mp3` / `audio/mpeg`。** 預設 edge-tts 產出就是 MP3、逐位元組原樣寫入，所以目前正確；但 MiniMax 可設成回傳 WAV，`mimo` 又是唯一會照副檔名走的 provider。要正名就得嗅探容器，那屬於 #8（Asset Import）的驗證範圍。
+- **`Scene.caption` 沒有任何人讀。** `scene_planner` 為每個 scene 產了一個 ≤20 字的 `caption`（例如旁白「九成企業導入 AI 的第一步就走錯了。」對應 caption「九成企業第一步就走錯」），但 #7 的 SRT 寫的是 **`narration` 逐字** —— 字幕軌要跟語音說的一致，說一套寫一套是錯的。`caption` 看起來是為「燒進畫面的短標」設計的，那是另一個產物。**沒有規格條文決定這件事**（PRD FR-004 只說「旁白句子或單字時間軸」皆可），要改是產品決定，而且會改動 #7 的驗收測試。
+- **字幕可讀性規則完全未定義。** PRD/SPEC/PLAN 都沒有每行字數、每條行數、最短/最長秒數。目前一個 scene 一條，在 three-scene-demo 是 17–26 個中文字撐 6–22 秒 —— 對直式短影音的燒錄字幕偏長。要切短就得決定切分規則，而且**切開後每段是否各自擁有 `caption_ref` 會打破兩份凍結 render manifest 釘死的 1:1 對映**。
 - **fixture 的 voice asset 路徑與 #6 產出不一致。** 兩組凍結 fixture 記的是 `assets/asset-voice-001.wav`，#6 依 SPEC §3.2 與 PLAN row 6 的驗收欄寫 `audio/master-voice.mp3`。目前沒有任何測試斷言 `storage_key`，所以兩者並存不會紅；但 **#9 讀的是 AssetRecord、不是 fixture**，要不要把 fixture 重新凍結成新路徑是個未決的小決定。
 - **`ContentJob.estimated_cost_usd` 永遠是 0**：建立時寫死，之後沒有任何地方更新它。
 - **`ProviderEvent` 的 `request_id` / `external_job_id` 一律空字串** —— LLM 呼叫無法對回 provider 端紀錄。
