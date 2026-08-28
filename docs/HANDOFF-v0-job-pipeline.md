@@ -15,7 +15,8 @@ V0 job pipeline 的相關合併：
 | #9 | `82abd8a` | issue #5：Scene Planner + Generation Manifest |
 | #10 | `414c6fc` | CI：Windows smoke 納入 job pipeline 測試 |
 | #11 | `f407192` | issue #6：Master Voice + 時間軸 |
-| 本次 | — | issue #7：由時間軸產字幕 |
+| #12 | `35235c1` | issue #7：由時間軸產字幕 |
+| 本次 | — | SPEC-001 §5.2 補邊 65→76 + `resume_target` 返回目標推導（見 §5） |
 
 PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 
@@ -25,7 +26,7 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 |---|---|
 | `app/models/content_job.py` | SPEC-001 §4.2–§4.6、§8 的 pydantic 契約 + `JobStatus`（23 狀態） + §6.1 `GenerationManifest` |
 | `app/services/jobs/store.py` | job 目錄檔案儲存，JSON 單檔 + JSONL append-only + scene 匯入目錄 |
-| `app/services/jobs/state_machine.py` | §5.2 的轉移表 + §5.3 錯誤分類，純函式無 I/O |
+| `app/services/jobs/state_machine.py` | §5.2 的轉移表 + §5.3 錯誤分類 + `resume_target` 返回目標推導，純函式無 I/O |
 | `app/services/jobs/budget.py` | §10 預算閘門 + 成本帳本 |
 | `app/services/jobs/postiz.py` | §6.4 draft-only 發布器 |
 | `app/services/jobs/pipeline.py` | issue #4：`create_job` / `start_scripting` / `generate_script` |
@@ -35,7 +36,7 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 | `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
 | `app/services/jobs/captions.py` | issue #7：由時間軸產 `subtitles/captions.srt` + `captions.json` |
 
-測試基準（2026-08-28 實測）：**1521 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1564 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 
 
 ## 2. 驗證現況（接手第一件事）
@@ -44,7 +45,7 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1521 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1564 passed / 11 skipped / 4172 subtests
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -216,28 +217,55 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 
 凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。另外，**這兩組 fixture 的 `scenes/` 是手寫的，不是 planner 產出的** —— 拿它們的 script 跑 `plan_scenes` 都會得到 8 個 scene，而 `ten-scene-demo` 的目錄裡是 10 個。不要把兩者當成同一回事。
 
-## 5. 需要人拍板的規格缺口（擋 issue #11）
+## 5. §5.2 補邊：停駐的 job 現在回得來
 
-SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 的 `TRANSITIONS`：
+**這一節先前記的缺口已經補上。** §5.2 從 65 條邊補到 **76 條**，補的全是「停下來的 job 怎麼回到流程」，沒有新的生成路徑：
 
-- **沒有任何一條邊指向 `FAILED`** —— 失敗的 job 永遠不會終結
-- **`MANUAL_ACTION_REQUIRED` 是單向黑洞**，唯一出邊是 `CANCELLED` —— 人補完素材後無法回到流程
-- **`BUDGET_EXCEEDED` 的出邊只有 `CANCELLED` 與 `MANUAL_ACTION_REQUIRED`** —— 兩條都不通往生成階段，所以提高預算也救不回 job
-- `RESEARCHING` / `IMAGE_GENERATING` / `VIDEO_GENERATING` 三個階段狀態**入邊為 0**
+| 類別 | 條數 | 內容 |
+|---|---|---|
+| 1 | 6 | `RETRYABLE_FAILED` → 6 個可恢復階段（可重試階段扣掉 `POSTIZ_DRAFTING` 與 `SCENE_PLANNING`） |
+| 2 | 1 | `RETRYABLE_FAILED` → `FAILED`。`FAILED` 先前入邊為 0，job 層級重試耗盡才走這條 |
+| 3 | 4 | `MANUAL_ACTION_REQUIRED` → `SCRIPTING` / `VOICE_GENERATING` / `AWAITING_ASSETS` / `READY_TO_RENDER` |
+| 4 | 0 | `BUDGET_EXCEEDED` **刻意沒有返回邊** |
 
-但 §5.3 要求「單一 AI 影片 Scene 最多重試一次，第二次失敗後轉成 image_motion fallback」—— 狀態機沒有路徑回到失敗的階段。
+`BUDGET_EXCEEDED` 的恢復是既有的兩跳：先 `→ MANUAL_ACTION_REQUIRED`，再由那裡返回。這是產品決定（用狀態機把人工檢查點做成結構性的），**不是**從 FR-007「不得自動繼續生成」推導出來的 —— 該條禁的是自動續跑，不是返回邊本身。返回之後閘門仍會重跑：真正擋住支出的是閘門，不是這張表。閘門目前**實際只有兩處**（`pipeline` 從 `SCRIPTING`、`master_voice` 從 `VOICE_GENERATING`），`READY_TO_RENDER` 那處是 §5.2 已寫入、尚未實作的第三處；三者都在返回集合內，所以兩跳對每個閘門位置都收斂。
 
-**這個缺口現在是承重的。** `pipeline.py` 的 `_persist_failed_status()` 對 retryable 失敗**刻意不轉移狀態**（留在 `SCRIPTING`），因為 `RETRYABLE_FAILED` 回不到生成階段，轉過去會讓可重試的失敗變成不可恢復。程式碼裡有註解標明這是產品決定。
+### 返回目標由 `decisions.jsonl` 推導，不由呼叫端挑
 
-**動 issue #11 之前必須先補 §5.2，這是產品決定，不要讓 agent 自己發明邊。** 補邊必須同步改規格、狀態機與那組 23×23 窮舉測試。
+`state_machine.resume_target(status, decisions)` 回答「回哪裡」，**不回答「可不可以回」** —— 後者是呼叫端的事：`RETRYABLE_FAILED` 可自動 resume（受 §5.3 重試上限與 §10 閘門節制），`MANUAL_ACTION_REQUIRED` 必須人工觸發，那正是該狀態名稱的意思。對這兩條返回列，§5.2 的表是**必要條件而非充分條件**：呼叫端必須先推導，不得自己挑一個合法目標。
+
+規則：由後往前走 `decisions.jsonl`，**取檔案順序**。每筆記錄若 `to` 等於目前狀態就取它的 `from`，否則取它的 `to`；`from == to` 的是拒絕留痕、不是移動，略過；候選落在三個停駐狀態是連鎖停駐，繼續往前走。
+
+兩條看起來可以簡化、實際不行的規則：
+
+- **不能改成用時間欄位 `at` 排序。** `at` 是 `job.updated_at`，而 `transition(now=)` 讓呼叫端能自己蓋時間戳，所以它不保證單調。（先前這裡的理由寫「兩份 fixture 有三行 `at` 相同，排序會打亂歷史」，**那是錯的** —— Python 的排序穩定，實測兩份 fixture 依 `at` 排序都等於檔案順序。理由換掉了，規則沒變，並補了一條會抓到排序寫法的測試。）
+- **候選要取停駐那一行的 `from`，不是前一行的 `to`。** 每個寫入端都是先 `store.save(job)` 再 `store.append_decision(...)`，崩在兩者之間會留下「`job.json` 已前進、對應的決策行沒寫」。讀前一行的 `to` 會安靜地回答一個較早的階段 —— 合法邊，錯答案。
+
+拒絕而不猜（每一條都有測試）：輸入不是停駐狀態；輸入是 `BUDGET_EXCEEDED`（錯誤訊息指向兩跳路徑）；決策紀錄為空（`DRAFT → MANUAL_ACTION_REQUIRED` 是合法邊，而只有 `start_scripting` 會寫第一行，所以真的到得了）；記錄缺 `from`／`to` 或帶未知狀態（**拒絕，不是略過**）；走完整份紀錄仍找不到非停駐階段；推導出的階段不在該狀態的**返回集合**內。
+
+最後一項刻意比對返回集合而不是 `TRANSITIONS[status]`：後者還含 `CANCELLED`（`RETRYABLE_FAILED` 還含 `FAILED`），是合法邊但不是「可以回去的階段」。回傳它等於讓「要求重啟」變成「安靜地取消」—— 這個破口在審查時實測到過，已修。
+
+### 兩個刻意的排除，以及各自的解除條件
+
+- **`POSTIZ_DRAFTING` 不是返回目標。** §5.3 要求 resume 走 idempotency key，而 `postiz.py` 從頭到尾沒讀過 idempotency key（也不走 `record_usage`，見 §7），重新進入會產生第二份草稿。**解除條件**：發布路徑先讀取並比對 idempotency key。
+- **`SCENE_PLANNING` 兩個返回集合都不在。** `plan_scenes` 在既有 scene 與重新推導的結果不一致時整批 `store.replace`，而 `_build_scenes` 把 `reference_assets` 硬填 `[]`，人工補入的素材參照會被抹掉 —— 那正是這兩條返回列要保住的東西。**危險在 planner，不在哪一條邊通向它**，所以兩邊一起排除；初版只擋了人工那條、留著 `RETRYABLE_FAILED → SCENE_PLANNING`，審查時被指出同一機制在那條上照樣成立，因此收掉（77 → 76）。**解除條件**：planner 改成合併而非替換（scene id 是決定性的 `scene-NNN`，可依 id 帶過舊的 `reference_assets`），屆時兩邊一起加回。
+
+### 還沒關的（動重試 runner 之前先看這裡）
+
+- **`SCENE_PLANNING` 也會停到 `MANUAL_ACTION_REQUIRED`**（`scene_planner._persist_unplannable`，腳本太短規劃不出 8 段時），但它不是返回目標，所以那類 job 目前**只能取消**。操作員唯一像樣的替代路線是走新的 `MANUAL_ACTION_REQUIRED → SCRIPTING` 重寫腳本，而那條路仍然會重跑 `plan_scenes`、仍然會抹掉 `reference_assets`。planner 改成合併同時關掉這兩條。
+- **resume 不收斂。** 推導是全函式但不終止：打到重試上限的 job 每次 resume 都拿到同一個階段、立刻再停駐，每輪往 `decisions.jsonl` 追加兩行。實測 7 輪零進展、零額外支出、每輪 +302 bytes。「log 有沒有長大」**不是**停止條件（每輪都會長）；runner 要停在「上一次 resume 只追加了 `park → stage` 與緊接著的 `stage → park`」。
+- **停駐來源的覆蓋率只有 4/19。** 推導答得出 `SCRIPTING`／`VOICE_GENERATING`／`AWAITING_ASSETS`／`READY_TO_RENDER`；`RENDERING`、`TECHNICAL_QA`、`CONTENT_QA`、`READY_FOR_REVIEW`、`POSTIZ_DRAFTING`、`POSTIZ_DRAFTED` 一律拒絕。所以「草稿建好了、改個文案再繼續」這種流程目前沒有自動路徑，接發布流程的那張 issue 要正面處理。
+- **§15 新增的未決項**：人工核可的 resume 是否重置該階段的重試計數、若重置由什麼 audit trail 記錄。現在的計數是從持久化的 idempotency key 重建的，等於 job 終身累計；若不重置，class 1 的返回列一走就立刻再次停駐，等於沒有作用。
+
+補邊同步改了規格（§5.2 表 + 類別列舉 + §12 + §15）、狀態機與那組窮舉測試，並修正了三個宣稱「`RETRYABLE_FAILED` 沒有出路」的過期註解（`pipeline` / `master_voice` / `captions` 的 park 行為**沒有動** —— 換成 park-and-resume 是另一張 slice）。**窮舉測試是手抄規格表的**，刻意不從被測模組 import 返回集合 —— 那才抓得到實作寫錯。測試基準線：**1564 passed / 11 skipped / 4172 subtests**（補邊前 1521）。
 
 ## 6. 剩下的 issue
 
 | # | 標題 | 大小 | 卡在哪 |
 |---|---|---|---|
-| 8 | Asset Import + Creator Profile preflight | L | **無阻塞**（#5 已完成） |
+| 8 | Asset Import + Creator Profile preflight | L | **無阻塞**（#5 已完成；`AWAITING_ASSETS` 的人工停駐現在有返回邊，見 §5） |
 | 9 | Render Manifest + Renderer + ffprobe QA | L | 依賴 #6 #7 #8 |
-| 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部 + §5 的規格缺口 |
+| 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部；§5.2 的返回邊已補，剩 §5「還沒關的」那幾條 |
 | — | Phase 3 POC 操作 runbook（PLAN-001 Q6 提到的 S 號 docs issue） | S | 無阻塞，尚未建立 |
 
 **階段之間的斷點目前都接上了**：`start_scripting()`（#4）→ `start_scene_planning()`（#5）→ `start_voice_generating()`（#6）。三個形狀一致：重讀 store、檢查前置文件存在、`transition` + `save` + `append_decision`。**`generate_master_voice()` 走到底會把 job 推進 `AWAITING_ASSETS`**，所以 #7 / #8 的入口狀態是那裡，不需要再補一條 stage 起手邊 —— `AWAITING_ASSETS → READY_TO_RENDER` 由 #8 擁有。

@@ -366,9 +366,11 @@ def _master_voice_asset(record) -> AssetRecord:
 def _park(job: ContentJob, store: JobStore, error: BaseException) -> None:
     """Move an unrecoverable job to ``MANUAL_ACTION_REQUIRED``.
 
-    A retryable failure stays put: ``AWAITING_ASSETS`` has no
-    ``RETRYABLE_FAILED`` edge, so moving there would strand it. Same shape as
-    ``master_voice._park``.
+    A retryable failure stays put: ``AWAITING_ASSETS`` is not a 可重試階段, so
+    §5.2 gives it no ``RETRYABLE_FAILED`` edge to take in the first place. (It
+    would no longer be a dead end if it did — RETRYABLE_FAILED now has return
+    rows — but there is still no edge into it from here.) The caller retries in
+    place. Same shape as ``master_voice._park``.
     """
     classification = classify_error(error)
     if classification.is_retryable:

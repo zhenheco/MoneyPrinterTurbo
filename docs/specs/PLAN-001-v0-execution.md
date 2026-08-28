@@ -54,7 +54,7 @@
 | # | 標題 | 範圍 | 驗收條件 | SPEC | 依賴 | 大小 |
 |---|---|---|---|---|---|---|
 | 1 | Job 資料契約與檔案儲存 | 7 個 pydantic model（ContentJob/Script/Scene/AssetRecord/ProviderEvent/UsageLedger/RenderManifest）+ job 目錄 store（load/save/JSONL append）+ frozen fixtures | schema 通過/拒絕案例各有 test；store round-trip；fixtures `three-scene-demo`/`ten-scene-demo` 建立 | §3.2 §4 §12 | — | M |
-| 2 | Job 狀態機 | 21 狀態 + §5.2 轉移表 + 非法跳轉拒絕 + retryable/manual/fatal error 分類 + `decisions.jsonl` | 每條合法轉移與代表性非法轉移有 test；PUBLISHED 不可達 | §5 | 1 | M |
+| 2 | Job 狀態機 | 23 狀態 + §5.2 轉移表 + 非法跳轉拒絕 + retryable/manual/fatal error 分類 + `decisions.jsonl` | 每條合法轉移與代表性非法轉移有 test；PUBLISHED 不可達 | §5 | 1 | M |
 | 3 | Budget Guard + 追溯記錄 | 呼叫前預算檢查、BUDGET_EXCEEDED 轉移、ProviderEvent/UsageLedger writer、idempotency key、actual_cost=unknown 處理 | 超額前阻止 provider 呼叫；重複 resume 不重複計費（idempotency test） | §10 §4.6 | 1,2 | S |
 | 4 | 建立 Job + Script JSON 生成 | CLI/API create（§3.1 輸入驗證）→ DRAFT→SCRIPTING；用既有 llm.py 產結構化 Script JSON + schema 驗證 + 1 次 repair retry | 從 topic 產出通過 schema 的 `scripts/script.json`；LLM 呼叫寫 ProviderEvent | §3.1 §9 FR-002 | 1,2,3 | M |
 | 5 | Scene Planner + Generation Manifest | Script→8~10 Scene JSON、≤3 `generated_video`、visual_type 分配、fallback_type、per-scene 目錄 + 人工匯入用 manifest 輸出 | 8~10 scene 恆成立；>3 video 被拒；manifest 列出每個 scene 的匯入路徑與 prompt | §4.4 §6.1 FR-003 | 4 | M |

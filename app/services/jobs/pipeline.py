@@ -162,7 +162,11 @@ def _persist_failed_status(
 ) -> None:
     classification = classify_error(exc)
     if classification.is_retryable:
-        # SPEC §5.2 lacks a RETRYABLE_FAILED->generation edge; product decision keeps SCRIPTING.
+        # §5.2 now returns RETRYABLE_FAILED to SCRIPTING, but this module still
+        # stays put: the attempt counter is rebuilt from the idempotency keys on
+        # every call, so the next generate_script resumes in place and the round
+        # trip through RETRYABLE_FAILED would buy nothing. Switching to
+        # park-and-resume is a separate slice.
         return
     current = store.load(job.content_job_id).job
     reason = (

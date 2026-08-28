@@ -15,9 +15,15 @@ there is no edge to reject. ``APPROVED`` and ``SCHEDULED`` are unreachable for
 the same reason: §5.2 reserves all three for the controlled publish flow of a
 later version.
 
-Two rows of §5.2 name a *class* of source states rather than a single state
-("任一可重試階段", "任一生成階段"). Those classes are spelled out as
-:data:`RETRYABLE_STAGES` and :data:`GENERATING_STAGES` below.
+Several rows of §5.2 name a *class* of states rather than a single state
+("任一可重試階段", "任一生成階段", "該次失敗的可恢復階段", "該次中斷的可恢復階段").
+Those classes are spelled out as :data:`RETRYABLE_STAGES`,
+:data:`GENERATING_STAGES`, :data:`RESUMABLE_STAGES` and
+:data:`MANUAL_RETURN_STAGES` below.
+
+For the two return rows the table is a necessary but not a sufficient condition:
+it says a job *may* go back to one of several stages, and :func:`resume_target`
+says which one. A caller must never pick any legal target.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Dict, FrozenSet, Mapping, Union
+from typing import Dict, FrozenSet, Mapping, Sequence, Union
 
 from app.models.content_job import ContentJob, JobStatus
 
@@ -72,6 +78,46 @@ GENERATING_STAGES: FrozenSet[JobStatus] = frozenset(
     }
 )
 
+#: The states a job parks in instead of progressing. A derivation that walks
+#: ``decisions.jsonl`` backwards must walk *past* these: a job can chain them
+#: (BUDGET_EXCEEDED then MANUAL_ACTION_REQUIRED), and none of them is a stage.
+PARKING_STATUSES: FrozenSet[JobStatus] = frozenset(
+    {
+        JobStatus.RETRYABLE_FAILED,
+        JobStatus.MANUAL_ACTION_REQUIRED,
+        JobStatus.BUDGET_EXCEEDED,
+    }
+)
+
+#: §5.2 "該次失敗的可恢復階段": where RETRYABLE_FAILED may return to.
+#: ``POSTIZ_DRAFTING`` is excluded: §5.3 requires resume to go through an
+#: idempotency key, and the Postiz publisher never reads one, so re-entering it
+#: would create a second Draft. Add it here once it does.
+#: ``SCENE_PLANNING`` is excluded for the reason given on
+#: :data:`MANUAL_RETURN_STAGES` — the hazard is the planner, not which row
+#: leads back into it, so both return sets exclude it or neither does.
+RESUMABLE_STAGES: FrozenSet[JobStatus] = RETRYABLE_STAGES - {
+    JobStatus.POSTIZ_DRAFTING,
+    JobStatus.SCENE_PLANNING,
+}
+
+#: §5.2 "該次中斷的可恢復階段": where MANUAL_ACTION_REQUIRED may return to.
+#: The three stages that actually park there today, plus ``READY_TO_RENDER``,
+#: which is where the budget gate sends a refusal and which generates nothing on
+#: re-entry (the render is local and free). ``SCENE_PLANNING`` is excluded: the
+#: planner rebuilds its scene list whenever it differs from a freshly derived
+#: one, and a freshly derived scene always carries an empty ``reference_assets``,
+#: so re-entry discards exactly the human-imported assets these rows exist to
+#: preserve. Add it to both sets once the planner can merge instead of replace.
+MANUAL_RETURN_STAGES: FrozenSet[JobStatus] = frozenset(
+    {
+        JobStatus.SCRIPTING,
+        JobStatus.VOICE_GENERATING,
+        JobStatus.AWAITING_ASSETS,
+        JobStatus.READY_TO_RENDER,
+    }
+)
+
 #: The eleven explicit rows of §5.2, in table order.
 LINEAR_TRANSITIONS = (
     (JobStatus.DRAFT, JobStatus.SCRIPTING),
@@ -96,6 +142,13 @@ def _build_table() -> Mapping[JobStatus, FrozenSet[JobStatus]]:
         table[source].add(JobStatus.RETRYABLE_FAILED)
     for source in GENERATING_STAGES:
         table[source].add(JobStatus.BUDGET_EXCEEDED)
+    table[JobStatus.RETRYABLE_FAILED].update(RESUMABLE_STAGES)
+    # §5.2 "RETRYABLE_FAILED → FAILED": the row above is bounded by
+    # "未超過上限", and a bound needs a state that says the bound was passed.
+    table[JobStatus.RETRYABLE_FAILED].add(JobStatus.FAILED)
+    table[JobStatus.MANUAL_ACTION_REQUIRED].update(MANUAL_RETURN_STAGES)
+    # BUDGET_EXCEEDED deliberately gets no return row: recovery is two hops,
+    # through the MANUAL_ACTION_REQUIRED edge it already has.
     for source in JobStatus:
         if source in TERMINAL_STATUSES:
             continue
@@ -116,6 +169,10 @@ TRANSITIONS: Mapping[JobStatus, FrozenSet[JobStatus]] = _build_table()
 
 class IllegalTransitionError(ValueError):
     """The requested state change is not a row of SPEC-001 §5.2."""
+
+
+class ResumeError(ValueError):
+    """The stage a parked job should return to cannot be derived. Never guessed."""
 
 
 class BudgetExceededError(ValueError):
@@ -205,6 +262,95 @@ def transition(
         )
     return job.model_copy(
         update={"status": target, "updated_at": now or _utc_now()}
+    )
+
+
+def _return_stages(status: JobStatus) -> FrozenSet[JobStatus]:
+    """The stages ``status`` may be resumed into — its §5.2 return row only."""
+    if status is JobStatus.RETRYABLE_FAILED:
+        return RESUMABLE_STAGES
+    return MANUAL_RETURN_STAGES
+
+
+def resume_target(
+    status: StatusLike, decisions: Sequence[Mapping[str, str]]
+) -> JobStatus:
+    """The stage a parked job returns to, derived from its ``decisions.jsonl``.
+
+    ``decisions`` is the already-loaded log, oldest first — this module never
+    reads a file. Answers 回哪裡, not 可不可以回: whether a resume is allowed at all
+    is the caller's decision (§5.3 retry limits for ``RETRYABLE_FAILED``, a human
+    trigger for ``MANUAL_ACTION_REQUIRED``). Raises :class:`ResumeError` rather
+    than returning a plausible stage — a wrong resume re-spends budget.
+
+    Two implementation rules that look like they could be simplified, and cannot:
+
+    *The log is walked in file order, never sorted by* ``at``. That field is
+    ``job.updated_at``, which :func:`transition` lets a caller stamp through its
+    ``now`` argument, so it is neither guaranteed monotonic nor a total order
+    (both frozen fixtures already carry three lines sharing one value). File
+    order is the only real record of what happened first.
+
+    *The candidate is the park line's* ``from``\\ *, not the previous line's*
+    ``to``. Every writer does ``store.save(job)`` and *then*
+    ``store.append_decision(...)``; a crash between the two leaves ``job.json``
+    advanced with its decision line missing. Reading the previous line's ``to``
+    then silently returns an older stage — a legal edge and a wrong answer.
+
+    Two known blind spots, so they are not rediscovered the hard way:
+
+    (a) The ``from == to`` skip makes a budget refusal invisible here: those
+        no-op lines record that a refusal happened, not that anything moved, so
+        a job that resumes will meet the same gate with no trace in the answer.
+    (b) The rule is total but not terminating. A job that re-parks identically
+        is handed the same stage forever. A resume always appends at least two
+        lines (its own ``park -> stage`` and whatever follows), so "did the log
+        grow" is not the stop condition; an automated runner must stop when the
+        last resume appended *only* those two — ``park -> stage`` immediately
+        followed by ``stage -> park`` — because that round made no progress.
+    """
+    current = as_status(status)
+    if current is JobStatus.BUDGET_EXCEEDED:
+        raise ResumeError(
+            "BUDGET_EXCEEDED has no return row in SPEC-001 §5.2: recovery is two "
+            "hops, BUDGET_EXCEEDED -> MANUAL_ACTION_REQUIRED and then resume from "
+            "there, so a human clears the spend before anything generates again"
+        )
+    if current not in (JobStatus.RETRYABLE_FAILED, JobStatus.MANUAL_ACTION_REQUIRED):
+        raise ResumeError(
+            f"{current.value} is not a parked status; there is nothing to resume"
+        )
+    if not decisions:
+        raise ResumeError(
+            f"{current.value} has an empty decision log, so no return stage can be "
+            "derived; the job needs a human to say where it belongs"
+        )
+    for record in reversed(decisions):
+        try:
+            source = as_status(record["from"])
+            target = as_status(record["to"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ResumeError(
+                f"decisions.jsonl holds a record that is not a usable transition: {exc}"
+            ) from exc
+        if source is target:
+            continue  # a refusal trace, not a movement
+        candidate = source if target is current else target
+        if candidate in PARKING_STATUSES:
+            continue  # parks chain; keep walking back to a stage
+        # Not ``TRANSITIONS[current]``: that also holds CANCELLED (and FAILED,
+        # for RETRYABLE_FAILED), which are legal moves but not stages to resume
+        # into. Handing one back would let a caller quietly cancel a job it was
+        # asked to restart, so the return set is what this must be checked against.
+        if candidate not in _return_stages(current):
+            raise ResumeError(
+                f"{current.value} -> {candidate.value} is not a SPEC-001 §5.2 "
+                f"return target, so the job cannot go back to the stage it came from"
+            )
+        return candidate
+    raise ResumeError(
+        f"{current.value} has no non-parking stage anywhere in its "
+        f"{len(decisions)} decision records, so no return stage can be derived"
     )
 
 
