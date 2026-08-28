@@ -12,9 +12,11 @@ V0 job pipeline 的相關合併：
 | #6 | `864963e` | issue #4：建立 Job + Script JSON 生成 |
 | #7 | `ac8b15b` | 修復 issue #4 交付時未被發現的破口（見 §3，**這一條最重要**） |
 | #8 | `084aa0d` | 上一版 handoff |
-| 本次 | — | issue #5：Scene Planner + Generation Manifest |
+| #9 | `82abd8a` | issue #5：Scene Planner + Generation Manifest |
+| #10 | `414c6fc` | CI：Windows smoke 納入 job pipeline 測試 |
+| 本次 | — | issue #6：Master Voice + 時間軸 |
 
-PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
+PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
 
 全部落在平行路徑 `app/services/jobs/`，**`app/services/task.py` 至今零修改**（上游熱區，侵入式修改會讓每次 merge upstream 都衝突 —— 見 PLAN-001 Q2）。
 
@@ -28,8 +30,10 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 | `app/services/jobs/pipeline.py` | issue #4：`create_job` / `start_scripting` / `generate_script` |
 | `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
+| `app/services/jobs/master_voice.py` | issue #6：`start_voice_generating` / `generate_master_voice` + 時間軸文件 |
+| `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
 
-測試基準（2026-08-28 實測）：**1414 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1458 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 （前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
@@ -38,13 +42,13 @@ PLAN-001 的 11 張 issue **做完 6 張**：#1 #2 #3 #4 #5 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1414 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1458 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
 **注意本地 checkout 可能落後或分歧。** 這在這台開發機上已經發生過兩次：本地 `main` 落後 origin 好幾個 commit，且帶著一個從未推上去的舊 handoff commit（`b5a411a`）。先 `git status` 與 `git log origin/main..HEAD` 確認，再決定 pull 或 reset。
 
-CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13 + Windows smoke。**Windows smoke 是逐檔列舉測試，目前沒有納入任何 job pipeline 測試**，而 `store.py` 正是全 repo 最吃 Windows 路徑語義的檔案。CI 也**沒有型別檢查**。
+CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13（含 redis service，跑全套）+ Windows smoke。Windows smoke 是**逐檔列舉**的，PR #10 之後納入了 7 個 job pipeline 測試檔（812 tests，實測全綠 —— 所以 `store.py` 沒有 POSIX-only 假設）。**新增 job pipeline 測試檔時要記得加進那份清單**，否則它不會在 Windows 上跑。需要 ffmpeg 的測試不要加（Windows runner 不保證有）。CI 仍然**沒有型別檢查**。
 
 ## 3. ⚠️ 最重要的一課：`llm.generate_script` 會摧毀 JSON
 
@@ -81,6 +85,37 @@ issue #4 交付時：57 個測試全綠、5 輪獨立審查收斂到 0 紅、mut
 修復後的測試把 mock 邊界下移到 **provider SDK client 層**（`patch("app.services.llm.OpenAI")`），讓 `_generate_response` 與 adapter 都真的跑過，只擋掉網路。目前有 3 個這種層級的測試，其中一個在舊實作下會紅。
 
 **接手守則：mock 掛在哪一層，就等於宣告哪一層以下你不驗。跨越模組邊界的驗收條件，至少要有一條測試真的走完全程。**
+
+## 3.1 同一課的第二次：`voice.tts` 也是回傳哨兵而不是拋例外
+
+issue #6 開工前對 `app/services/voice.py` 做了同樣的稽核。它沒有 `format_response` 那種破壞資料的後處理，但**另外兩個坑一模一樣**，而且多了一個單位陷阱。以下全是 2026-08-28 實測，不是讀碼推論：
+
+| 量測 | 結果 |
+|---|---|
+| `tts()` 缺憑證 / 錯憑證 / 斷網 | 三種都回 **`None`**，一次都沒拋例外 |
+| `populate_legacy_submaker_with_full_text(SubMaker(), "...", 3.0)` | `offset == [(0, 15000000), (15000000, 30000000)]` |
+| edge 路徑的 `cues[0].start` | `datetime.timedelta` |
+| 斷網時 edge 路徑耗時 | 約 **90 秒**（3 次 × 30 秒 timeout）才回 None |
+
+三件事會咬人：
+
+1. **`None` 是它唯一的失敗訊號。** 把回傳當成「可選」的呼叫端會寫出 0 byte 音檔、記一筆 `bytes: 0` 的 AssetRecord、然後把 job 推進 `AWAITING_ASSETS`，彷彿成功了 —— 正是 SPEC-001 §7 第 6 條「確認素材不是空檔或不完整下載」禁止的事。
+2. **`offset` 是 100 奈秒 tick，不是毫秒也不是秒**（1 秒 = 10,000,000）。除以 1000 會把 3 秒錄成 30000 毫秒，而且 issue #7 的「字幕不超出 voice 長度」會對著一個放大 10 倍的天花板通過。edge 路徑的 `cues` 又是 `timedelta` —— **同一個 SubMaker 物件上有兩套並存的單位**。
+3. **每個 provider（Gemini 除外）內部自行重試 3 次。** 一次 `tts()` 呼叫等於授權最多 3 次真實 provider 請求，而它不回報打了幾次。預算天花板必須以「整次呼叫」為單位，不是「一次請求」。
+
+另外兩個讀碼發現、未實測但程式碼明確的地雷：`azure_tts_v1` 的成功判定**只看字幕串流非空**，從不檢查有沒有收到音訊 chunk（`voice.py:802`）；`siliconflow` 在解不開下載內容時會**捏造一條 1 秒的時間軸**（`voice.py:935-947`）並回報成功。
+
+### 現在的正確做法
+
+`app/services/jobs/voice_adapter.py` 是隔離層，`master_voice.py` 只透過它碰 provider：
+
+- `None` → `VoiceTransportError`，依訊息分 retryable。
+- 兩種時間軸統一正規化成**整數毫秒**，下游不必知道 `voice.py` 有一半在講 tick。
+- 交件前強制驗 `size > 0`、時間軸非空、`total_duration_ms > 0`；**而且在能解碼出時長時比對時間軸與實際音訊，差距超過 25% 就拒收** —— 那正是 siliconflow 捏造時間軸的特徵。
+- **解不出時長要先問「這台機器有 decoder 嗎」再決定。** `_measure` 用的是 provider 內部失敗的同一個 decoder，所以「非空但解不開」的檔案也回 0.0 —— 早期版本把它當成「量不到」而採信 provider 的時間軸，等於讓捏造的時間軸原樣過關（審查實跑重現：4100 bytes 截斷 MP3 + `offset=[(0,10000000)]` → 得到 `duration_ms=1000, duration_source="timeline"`）。現在：有 decoder 卻讀不出來 → **拒收**；真的沒有 decoder → 記 `duration_source: "timeline"`，讓下游知道這份時長沒被證實。
+- **segment 的邊界會被夾到最終時長，但一個都不會被刪。** 容許 25% 漂移後 `total_duration_ms` 取實測值，所以一個合法的 take 也可能有 segment 結束在總長之後；不夾的話 timeline 文件自己前後矛盾，而 #7 的字幕直接吃它。**「夾」不等於「丟」** —— 第一版用 `break` 把起點超過總長的 segment 整個刪掉，實測 3.0 秒音訊配 3.1 秒時間軸（漂移 3.2%，遠在容許範圍內）就會讓最後一個詞從文件裡無聲消失。被 provider 標在音訊結束之後的那個詞，寧可寫成零寬度區間（意思是「有這句、但沒聽到」），也不要刪到什麼痕跡都不剩。
+
+**不要從 stage 直接呼叫 `voice.tts`。** 也不要照抄它的參數順序：`voice_file` 在 7 個 provider 裡有的是第 3 個位置參數、有的是第 4 個，位置呼叫會把輸出路徑跟語速對調。一律用關鍵字。
 
 ## 4. 已交付 API 的坑（誤用會靜默毀資料）
 
@@ -144,6 +179,22 @@ plan_scenes(job, store)            # 8~10 個 Scene + 匯入目錄 + generation_
 - **manifest 的 `created_at` 是「這份 manifest 何時被寫出」，不是決定性的。** 同一個 job 正常只會寫一次，但 manifest 被刪掉後重跑會補一份新的、帶新時間戳。scene 內容仍然完全決定性；不要拿整份 manifest 做 byte 比對當回歸測試，要比就比 `entries`。
 - `generated_video` 名額 = `min(job.max_generated_video_scenes, 3, body scene 數 // 3)`，取 narration 最長的 body scene，同長度時取 index 小的。**上限是天花板不是配額**，所以典型 V0 job 只會拿到 1~2 個 AI 影片。
 
+Master Voice（issue #6）：
+
+```python
+start_voice_generating(job, store)   # SCENE_PLANNING -> VOICE_GENERATING
+generate_master_voice(job, store)    # 一次 TTS -> audio/ + 時間軸 + AssetRecord -> AWAITING_ASSETS
+```
+
+- **一個 job 只有一個 Master Voice**（SPEC §6.3、PRD FR-004A）。這由 stage 自己的短路強制，**不是** store：`assets.jsonl` 是 append-only、完全不去重，`append_event` 只是加一行。
+- **短路條件是「完整」不是「存在」**：AssetRecord、音檔 bytes、時間軸文件三者齊備才算做完；缺任何一個都會報錯而**不是**再合成一次。（這是 #5 教訓 5 的同型防護。）
+- **`audio/` 與時間軸刻意不在 `JobRecord` 裡**，所以 `replace()` 刪不到它們 —— 那些 bytes 是花 provider 呼叫換來的。走 `store.master_voice_path()` / `write_master_voice_timestamps()`。
+- **`audio/master-voice-timestamps.json` 的 schema 是這裡發明的**，規格沒有定義：`{content_job_id, master_voice_asset_id, total_duration_ms, duration_source, segments:[{index,text,start_ms,end_ms}]}`，全部整數毫秒。#7 直接吃這份；要改形狀請連 #7 一起改。
+- **`duration_source`** 是 `"measured"`（解碼實際音訊得出）或 `"timeline"`（host 沒有 decoder，只能採信 provider 自報）。#9 的 QA 若要斷言時長，只有 `"measured"` 才算證實過。
+- **免費 provider 記真實 0.0，付費 provider 記天花板 + `"unknown"`。** edge-tts 與 no-voice 不計費，給它們記 0.05 會讓每個 V0 job 平白吃掉 1.7% 預算，而且讓 `actual_cost_usd` 往另一個方向錯 —— §10 禁止把「未知」寫成 0，但把「已知的 0」寫成一個發明的非零數同樣不誠實。
+- **語音選擇看 `job.language`**（`zh-TW` 會拿到台灣配音，不是大陸配音），`config.app["voice_name"]` 覆寫它。SPEC §3.1 的請求契約沒有語音欄位、`ContentJob` 又是 `extra="forbid"`，所以 job 目前帶不了自己的語音設定 —— 見 §7。
+- **合成語音的 consent 欄位**：`consent_status="not_applicable"`、`manual_review_status="not_required"`、`license_or_consent="synthetic_tts_no_creator_reference"`。SPEC §6.3 的同意規範管的是「引用真人聲音」，這條路徑不 clone 也不模仿任何人；FR-005 的 preflight 同樣明文只針對真人 voice/avatar。**#8 要把這個範圍寫死**，否則合成語音會卡在一個為真人設計的人工審核閘門上。
+
 凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。另外，**這兩組 fixture 的 `scenes/` 是手寫的，不是 planner 產出的** —— 拿它們的 script 跑 `plan_scenes` 都會得到 8 個 scene，而 `ten-scene-demo` 的目錄裡是 10 個。不要把兩者當成同一回事。
 
 ## 5. 需要人拍板的規格缺口（擋 issue #11）
@@ -165,14 +216,13 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 
 | # | 標題 | 大小 | 卡在哪 |
 |---|---|---|---|
-| 6 | Master Voice + 時間軸 | M | **無阻塞，可立刻開工**（#5 已完成） |
-| 7 | 字幕生成 | S | 依賴 #6 |
+| 7 | 字幕生成 | S | **無阻塞，可立刻開工**（#6 已完成） |
 | 8 | Asset Import + Creator Profile preflight | L | **無阻塞**（#5 已完成） |
 | 9 | Render Manifest + Renderer + ffprobe QA | L | 依賴 #6 #7 #8 |
 | 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部 + §5 的規格缺口 |
 | — | Phase 3 POC 操作 runbook（PLAN-001 Q6 提到的 S 號 docs issue） | S | 無阻塞，尚未建立 |
 
-**#4 與 #5 之間那段斷點已補上**：`start_scene_planning()` 把 `SCRIPTING` 推進 `SCENE_PLANNING` 並寫 `decisions.jsonl`。**#5 與 #6 之間現在是同一種斷點**：`plan_scenes()` 結束後 job 停在 `SCENE_PLANNING`，沒有任何程式碼把它推進 `VOICE_GENERATING`（這條邊在轉移表裡合法）。#6 開工第一件事要補這一步 —— 照 `start_scene_planning` 的形狀寫（重讀 store、檢查前置文件存在、transition + save + append_decision）。
+**階段之間的斷點目前都接上了**：`start_scripting()`（#4）→ `start_scene_planning()`（#5）→ `start_voice_generating()`（#6）。三個形狀一致：重讀 store、檢查前置文件存在、`transition` + `save` + `append_decision`。**`generate_master_voice()` 走到底會把 job 推進 `AWAITING_ASSETS`**，所以 #7 / #8 的入口狀態是那裡，不需要再補一條 stage 起手邊 —— `AWAITING_ASSETS → READY_TO_RENDER` 由 #8 擁有。
 
 **#8 需要的東西 #5 已經備好**：每個 scene 的匯入目錄（`scenes/{scene_id}/images/` 或 `videos/`，SPEC §3.2 形狀）與 `generation_manifest.json` 的 `import_dir` / `expected_filename` / `accepted_mime_types`。#8 的驗證應該對照 manifest，不要另外定義一套檔名或路徑規則。
 
@@ -192,7 +242,10 @@ SPEC-001 §5.2 的轉移表有洞。實測 `app/services/jobs/state_machine.py` 
 ## 7. 已知限制（審查有案，刻意未修）
 
 - **`app/services/jobs/` 在 production 端零呼叫者** —— 只有 pytest 進得去。SPEC §9 的 7 個入口（create / plan-assets / import-assets / render / qa / upload / postiz-draft / `run --job`）一個都沒接，`cli.py` 沒有任何 job 相關 subcommand。issue #4 範圍字面上寫了「CLI/API create」，但交付的只有 `pipeline.create_job()` 這個 Python 函式。
-- **`create_job` 把 `creator_profile_id` 硬填空字串**，而 SPEC §3.1 的輸入契約根本沒有這個欄位。每個 V0 job 都無法連回 consent 記錄，這會擋到 #6 / #8 / #9。
+- **`create_job` 把 `creator_profile_id` 硬填空字串**，而 SPEC §3.1 的輸入契約根本沒有這個欄位。每個 V0 job 都無法連回 consent 記錄。**這條先前寫「擋到 #6」，實測不成立** —— #6 合成的是 TTS，不引用任何真人聲音，所以不需要 creator profile（見 §4 的 consent 欄位）。它仍然擋 #8 / #9 的**真人素材**路徑。
+- **job 帶不了自己的語音設定。** SPEC §3.1 的請求契約沒有語音欄位，`ContentJob` 是 `extra="forbid"`，而 repo 裡唯一的 `voice_name` 設定住在 `[ui]`（WebUI 自己的偏好儲存）。#6 因此讀 `config.app["voice_name"]`、否則依 `job.language` 選一個。**同一台機器上跑兩個不同語言的 job 會共用同一個設定值**，這在接 CLI/API 層時要解決。
+- **音檔容器是寫死的 `.mp3` / `audio/mpeg`。** 預設 edge-tts 產出就是 MP3、逐位元組原樣寫入，所以目前正確；但 MiniMax 可設成回傳 WAV，`mimo` 又是唯一會照副檔名走的 provider。要正名就得嗅探容器，那屬於 #8（Asset Import）的驗證範圍。
+- **fixture 的 voice asset 路徑與 #6 產出不一致。** 兩組凍結 fixture 記的是 `assets/asset-voice-001.wav`，#6 依 SPEC §3.2 與 PLAN row 6 的驗收欄寫 `audio/master-voice.mp3`。目前沒有任何測試斷言 `storage_key`，所以兩者並存不會紅；但 **#9 讀的是 AssetRecord、不是 fixture**，要不要把 fixture 重新凍結成新路徑是個未決的小決定。
 - **`ContentJob.estimated_cost_usd` 永遠是 0**：建立時寫死，之後沒有任何地方更新它。
 - **`ProviderEvent` 的 `request_id` / `external_job_id` 一律空字串** —— LLM 呼叫無法對回 provider 端紀錄。
 - **`postiz` 完全繞過 `record_usage`**（0 次呼叫、2 次直接 `append_event`）—— 沒有去重、不寫 ledger、不回寫花費。草稿成本是 0 所以目前無害，但兩條寫入路徑的保證不同，加新欄位時容易漏。同一 attempt 重播會在 Postiz 上產生第二份草稿。draft_id 也只活在 `provider_events.jsonl` 的 `external_job_id`，沒寫回 job。
