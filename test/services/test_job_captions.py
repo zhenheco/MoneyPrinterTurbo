@@ -9,10 +9,12 @@ assertion below reads bytes that the code under test actually wrote.
 import hashlib
 import json
 import re
+from unittest.mock import patch
 
 import pytest
 
 from app.models.content_job import JobStatus
+from app.services.jobs import voice_adapter
 from app.services.jobs.captions import (
     CaptionCue,
     CaptionsError,
@@ -343,12 +345,18 @@ def test_a_measured_timeline_is_recorded_as_measured(tmp_path):
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 def test_an_unproven_timeline_still_produces_captions_and_says_so(tmp_path):
-    """duration_source == "timeline" means no decoder was available, so the
+    """``duration_source == "timeline"`` means no decoder was available, so the
     ceiling is the provider's own claim. #6 records rather than refuses; #7
-    does the same and passes the fact on to #9."""
-    store, job_id, _ = captioned(
-        tmp_path, audio=[b"opaque-bytes-no-decoder-can-read"]
-    )
+    does the same and passes the fact on to #9.
+
+    ``decoder_available`` is patched because that state is a property of the
+    machine, not of the pipeline — undecodable bytes alone will not reach this
+    branch any more, since #6 now refuses them outright when a decoder exists.
+    """
+    with patch.object(voice_adapter, "decoder_available", return_value=False):
+        store, job_id, _ = captioned(
+            tmp_path, audio=[b"opaque-bytes-no-decoder-can-read"]
+        )
 
     document = store.read_captions_document(job_id)
     assert document["voice_duration_source"] == "timeline"

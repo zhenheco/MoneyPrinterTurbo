@@ -29,10 +29,12 @@ This module is the isolation layer, in the same shape as
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from typing import Any, List, Sequence, Tuple
 
 from app.services import voice
+from app.utils import utils
 
 #: ``SubMaker.offset`` is in 100-nanosecond ticks. Measured, not assumed.
 TICKS_PER_SECOND = 10_000_000
@@ -133,16 +135,60 @@ def timeline_segments(sub_maker: Any) -> List[VoiceSegment]:
     )
 
 
-def _measure(audio_path: str) -> float:
-    """Decoded duration in seconds, or ``0.0`` when nothing could read it.
+def decoder_available() -> bool:
+    """Is there an ffmpeg on this host at all?
 
-    ``voice.get_audio_duration`` never raises: a missing file, an undecodable
-    file and a host with no ffmpeg all come back as ``0.0``.
+    This is the question that makes a zero measurement interpretable.
+    ``voice.get_audio_duration`` answers ``0.0`` for a missing file, an
+    undecodable file *and* a host with no decoder. Without knowing which host
+    we are on, "0.0" cannot be told apart from "this file is corrupt" — and
+    treating the corrupt case as merely unmeasurable is exactly how a
+    fabricated timeline gets believed.
+
+    ``utils.get_ffmpeg_binary`` falls back to the bare string ``"ffmpeg"`` when
+    it finds nothing, so its answer is checked against the filesystem rather
+    than taken at face value.
     """
+    binary = utils.get_ffmpeg_binary()
+    if not binary:
+        return False
+    if os.path.isabs(binary):
+        return os.path.isfile(binary) and os.access(binary, os.X_OK)
+    return shutil.which(binary) is not None
+
+
+def _measure(audio_path: str) -> float:
+    """Decoded duration in seconds, or ``0.0`` when nothing could read it."""
     try:
         return float(voice.get_audio_duration(audio_path))
     except Exception:  # pragma: no cover - the helper is documented not to raise
         return 0.0
+
+
+def _clamped(segments: Sequence[VoiceSegment], duration_ms: int) -> List[VoiceSegment]:
+    """Segments with their bounds pulled inside the duration the take reports.
+
+    An in-tolerance take whose audio decodes *shorter* than its timeline would
+    otherwise publish segments ending after its own stated total, and
+    downstream reads the two together.
+
+    Every segment survives. Dropping the ones that start past the end would
+    lose the words in them — measured, a 3.0 s take against a 3.1 s timeline is
+    3.2% drift, well inside tolerance, and the trailing word simply disappeared
+    from the document the captions stage reads. A word the provider timed after
+    the audio ended is better published with a zero-width span, which says
+    "claimed but not heard", than deleted with nothing to show it was ever
+    there.
+    """
+    return [
+        VoiceSegment(
+            index=index,
+            text=segment.text,
+            start_ms=min(segment.start_ms, duration_ms),
+            end_ms=min(segment.end_ms, duration_ms),
+        )
+        for index, segment in enumerate(segments, start=1)
+    ]
 
 
 def synthesize(
@@ -221,8 +267,25 @@ def synthesize(
                 f"{measured_ms} ms; the take does not describe its own audio"
             )
         duration_ms, duration_source = measured_ms, "measured"
+    elif decoder_available():
+        # Non-empty bytes that this host's decoder refuses. That is the shape a
+        # truncated download leaves behind — and the drift check above can
+        # never see it, because ``_measure`` uses the very decoder that failed
+        # inside the provider. Falling back to the timeline here is how a
+        # fabricated one gets believed, so refuse instead.
+        raise VoiceTransportError(
+            "tts wrote audio the decoder cannot read; the file is truncated "
+            "or is not the container it claims to be"
+        )
     else:
+        # Genuinely no decoder on this host. The timeline is the provider's own
+        # claim and is recorded as such, so downstream can tell it apart from a
+        # duration this pipeline actually proved.
         duration_ms, duration_source = timeline_ms, "timeline"
+
+    # No emptiness guard after this: _clamped moves bounds, it never drops a
+    # segment, and the list was proven non-empty above.
+    segments = _clamped(segments, duration_ms)
 
     return VoiceTake(
         audio_path=voice_file,
