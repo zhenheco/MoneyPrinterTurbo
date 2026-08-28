@@ -166,25 +166,29 @@ def _measure(audio_path: str) -> float:
 
 
 def _clamped(segments: Sequence[VoiceSegment], duration_ms: int) -> List[VoiceSegment]:
-    """Segments trimmed to the duration the take actually reports.
+    """Segments with their bounds pulled inside the duration the take reports.
 
     An in-tolerance take whose audio decodes *shorter* than its timeline would
     otherwise publish segments ending after its own stated total, and
     downstream reads the two together.
+
+    Every segment survives. Dropping the ones that start past the end would
+    lose the words in them — measured, a 3.0 s take against a 3.1 s timeline is
+    3.2% drift, well inside tolerance, and the trailing word simply disappeared
+    from the document the captions stage reads. A word the provider timed after
+    the audio ended is better published with a zero-width span, which says
+    "claimed but not heard", than deleted with nothing to show it was ever
+    there.
     """
-    kept: List[VoiceSegment] = []
-    for segment in segments:
-        if segment.start_ms >= duration_ms:
-            break
-        kept.append(
-            VoiceSegment(
-                index=len(kept) + 1,
-                text=segment.text,
-                start_ms=segment.start_ms,
-                end_ms=min(segment.end_ms, duration_ms),
-            )
+    return [
+        VoiceSegment(
+            index=index,
+            text=segment.text,
+            start_ms=min(segment.start_ms, duration_ms),
+            end_ms=min(segment.end_ms, duration_ms),
         )
-    return kept
+        for index, segment in enumerate(segments, start=1)
+    ]
 
 
 def synthesize(
@@ -279,11 +283,9 @@ def synthesize(
         # duration this pipeline actually proved.
         duration_ms, duration_source = timeline_ms, "timeline"
 
+    # No emptiness guard after this: _clamped moves bounds, it never drops a
+    # segment, and the list was proven non-empty above.
     segments = _clamped(segments, duration_ms)
-    if not segments:
-        raise VoiceTransportError(
-            f"every timeline segment starts at or after {duration_ms} ms"
-        )
 
     return VoiceTake(
         audio_path=voice_file,

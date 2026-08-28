@@ -113,9 +113,15 @@ jobs:
       # The job pipeline writes and reads a directory tree per job, so it is the
       # part of this repository most exposed to Windows path semantics —
       # separators, path containment checks, and reserved characters in ids.
-      # These tests are pure filesystem + pydantic work with no Redis, no
-      # network and no ffmpeg, so they are cheap to run here and this is the
-      # only job that would ever catch a POSIX-only assumption in them.
+      # These tests are filesystem + pydantic work with no Redis and no
+      # network, so they are cheap to run here and this is the only job that
+      # would ever catch a POSIX-only assumption in them.
+      #
+      # Add every new job pipeline test file to this list — it is enumerated,
+      # so a file left off simply never runs on Windows. The master voice tests
+      # touch ffmpeg through the duration probe, but they self-gate: the ones
+      # that need a decoder skip without it, and imageio-ffmpeg ships a
+      # bundled binary in its wheel, so they are safe here either way.
       - name: Run job pipeline tests
         run: >-
           uv run --no-sync python -X utf8 -m pytest -q
@@ -126,3 +132,4 @@ jobs:
           test/services/test_job_pipeline.py
           test/services/test_job_scene_planner.py
           test/services/test_job_postiz.py
+          test/services/test_job_master_voice.py

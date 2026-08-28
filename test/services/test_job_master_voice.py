@@ -416,6 +416,56 @@ def test_segments_never_end_after_the_duration_the_take_reports(tmp_path):
     assert max(s["end_ms"] for s in timeline["segments"]) <= total
 
 
+@needs_decoder
+def test_clamping_never_loses_a_spoken_word(tmp_path):
+    """Trimming the bounds is not the same as dropping the segment.
+
+    A word the provider timed just past the decoded end is only a few percent
+    of drift — well inside tolerance — and deleting it would silently remove
+    text from the document the captions stage reads, with nothing to show it
+    was ever there.
+    """
+    store, job = seeded(tmp_path)
+    voicing = start_voice_generating(job, store)
+    # 3.0 s of audio; the second boundary starts at 3.02 s, just past the end.
+    with edge(
+        audio=[wav_bytes(3.0)],
+        boundaries=[
+            {"offset": 0, "duration": 29 * TICKS_PER_SECOND // 10, "text": "first"},
+            {
+                "offset": 302 * TICKS_PER_SECOND // 100,
+                "duration": 8 * TICKS_PER_SECOND // 100,
+                "text": "LAST-WORD",
+            },
+        ],
+    ):
+        generate_master_voice(voicing, store)
+
+    timeline = store.read_master_voice_timestamps(job.content_job_id)
+    total = timeline["total_duration_ms"]
+    texts = [segment["text"] for segment in timeline["segments"]]
+
+    assert timeline["duration_source"] == "measured"
+    assert texts == ["first", "LAST-WORD"]
+    for segment in timeline["segments"]:
+        assert segment["start_ms"] <= segment["end_ms"] <= total
+
+
+def test_decoder_available_agrees_with_the_resolver(tmp_path):
+    """It fails closed, but a wrong answer either way changes which branch of
+    synthesize runs, so pin it to the resolver it is derived from."""
+    with patch.object(voice_adapter.utils, "get_ffmpeg_binary", return_value=""):
+        assert voice_adapter.decoder_available() is False
+    with patch.object(
+        voice_adapter.utils, "get_ffmpeg_binary", return_value="/nonexistent/ffmpeg"
+    ):
+        assert voice_adapter.decoder_available() is False
+    with patch.object(
+        voice_adapter.utils, "get_ffmpeg_binary", return_value="definitely-not-a-binary"
+    ):
+        assert voice_adapter.decoder_available() is False
+
+
 def test_a_crash_before_the_status_write_is_finished_on_rerun(tmp_path):
     """The asset write and the status write are two steps.
 

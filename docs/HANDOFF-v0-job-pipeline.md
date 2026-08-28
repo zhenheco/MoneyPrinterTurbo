@@ -33,7 +33,7 @@ PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
 | `app/services/jobs/master_voice.py` | issue #6：`start_voice_generating` / `generate_master_voice` + 時間軸文件 |
 | `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
 
-測試基準（2026-08-28 實測）：**1456 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-28 實測）：**1458 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 （前一版基準是 1344；差額全部是 issue #5 新增的測試，沒有既有測試被改動。）
 
 ## 2. 驗證現況（接手第一件事）
@@ -42,7 +42,7 @@ PLAN-001 的 11 張 issue **做完 7 張**：#1 #2 #3 #4 #5 #6 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1456 passed / 11 skipped
+.venv/bin/python -m pytest test -q                    # 1458 passed / 11 skipped
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -113,7 +113,7 @@ issue #6 開工前對 `app/services/voice.py` 做了同樣的稽核。它沒有 
 - 兩種時間軸統一正規化成**整數毫秒**，下游不必知道 `voice.py` 有一半在講 tick。
 - 交件前強制驗 `size > 0`、時間軸非空、`total_duration_ms > 0`；**而且在能解碼出時長時比對時間軸與實際音訊，差距超過 25% 就拒收** —— 那正是 siliconflow 捏造時間軸的特徵。
 - **解不出時長要先問「這台機器有 decoder 嗎」再決定。** `_measure` 用的是 provider 內部失敗的同一個 decoder，所以「非空但解不開」的檔案也回 0.0 —— 早期版本把它當成「量不到」而採信 provider 的時間軸，等於讓捏造的時間軸原樣過關（審查實跑重現：4100 bytes 截斷 MP3 + `offset=[(0,10000000)]` → 得到 `duration_ms=1000, duration_source="timeline"`）。現在：有 decoder 卻讀不出來 → **拒收**；真的沒有 decoder → 記 `duration_source: "timeline"`，讓下游知道這份時長沒被證實。
-- **segment 會被夾到最終時長。** 容許 25% 漂移後 `total_duration_ms` 取實測值，所以一個合法的 take 也可能有 segment 結束在總長之後。不夾的話 timeline 文件自己前後矛盾，而 #7 的字幕直接吃它。
+- **segment 的邊界會被夾到最終時長，但一個都不會被刪。** 容許 25% 漂移後 `total_duration_ms` 取實測值，所以一個合法的 take 也可能有 segment 結束在總長之後；不夾的話 timeline 文件自己前後矛盾，而 #7 的字幕直接吃它。**「夾」不等於「丟」** —— 第一版用 `break` 把起點超過總長的 segment 整個刪掉，實測 3.0 秒音訊配 3.1 秒時間軸（漂移 3.2%，遠在容許範圍內）就會讓最後一個詞從文件裡無聲消失。被 provider 標在音訊結束之後的那個詞，寧可寫成零寬度區間（意思是「有這句、但沒聽到」），也不要刪到什麼痕跡都不剩。
 
 **不要從 stage 直接呼叫 `voice.tts`。** 也不要照抄它的參數順序：`voice_file` 在 7 個 provider 裡有的是第 3 個位置參數、有的是第 4 個，位置呼叫會把輸出路徑跟語速對調。一律用關鍵字。
 
