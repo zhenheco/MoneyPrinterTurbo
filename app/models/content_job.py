@@ -278,3 +278,48 @@ class RenderManifest(BaseModel):
     scenes: List[RenderSceneEntry]
     subtitle_asset_id: Optional[str]
     output: RenderOutput
+
+
+class GenerationManifestEntry(BaseModel):
+    """One row of the SPEC-001 §6.1 generation manifest.
+
+    The manifest is the hand-off to a human: everything needed to produce this
+    scene's visual and drop it in the right place, without reading the job's
+    other files. ``import_dir`` is relative to the job directory — an absolute
+    path would not survive the job tree being moved between machines.
+    """
+
+    model_config = _STRICT
+
+    scene_id: str
+    scene_index: int
+    semantic_purpose: str
+    visual_type: VisualType
+    fallback_type: str
+    generation_required: bool
+    provider: str
+    prompt: str
+    narration: str
+    duration_target_ms: int
+    import_dir: str
+    expected_filename: str
+    accepted_mime_types: List[str]
+
+
+class GenerationManifest(BaseModel):
+    """SPEC-001 §6.1: the assisted-generation work list for one job.
+
+    ``generated_video_scene_count`` sits next to the ceiling it must respect so
+    the §4.4 「generated_video 最多 3 個」 rule is checkable from the manifest
+    alone, without reloading every scene document.
+    """
+
+    model_config = _STRICT
+
+    content_job_id: str
+    image_mode: str
+    video_mode: str
+    max_generated_video_scenes: int
+    generated_video_scene_count: int
+    entries: List[GenerationManifestEntry]
+    created_at: str
