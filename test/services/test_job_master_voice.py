@@ -310,30 +310,133 @@ def test_legacy_tick_timeline_is_normalised_the_same_way():
 
 @needs_decoder
 def test_duration_is_measured_from_the_audio_when_a_decoder_exists(tmp_path):
-    store, job_id, asset = voiced(tmp_path, seconds=3.0)
-    timeline = store.read_master_voice_timestamps(job_id)
+    """The fixture is asymmetric on purpose.
 
+    With a 3.0 s timeline over 3.0 s of audio the two candidate values are
+    identical, so the test would grade only the literal string "measured" and
+    would stay green if the code returned the provider's timeline instead.
+    2.7 s of boundaries over 3.0 s of audio is 10% drift — inside tolerance,
+    and far enough apart to tell the two answers apart.
+    """
+    store, job = seeded(tmp_path)
+    voicing = start_voice_generating(job, store)
+    half = 27 * TICKS_PER_SECOND // 20  # 1.35 s, so the timeline claims 2.7 s
+
+    with edge(
+        audio=[wav_bytes(3.0)],
+        boundaries=[
+            {"offset": 0, "duration": half, "text": "first"},
+            {"offset": half, "duration": half, "text": "second"},
+        ],
+    ):
+        asset = generate_master_voice(voicing, store)
+
+    timeline = store.read_master_voice_timestamps(job.content_job_id)
     assert timeline["duration_source"] == "measured"
     assert abs(timeline["total_duration_ms"] - 3000) <= 100
+    assert timeline["total_duration_ms"] > 2800  # not the 2700 ms timeline
     assert asset.duration_ms == timeline["total_duration_ms"]
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
-def test_duration_falls_back_to_the_timeline_when_nothing_can_decode(tmp_path):
+def test_duration_falls_back_to_the_timeline_only_on_a_decoderless_host(tmp_path):
     """A host with no decoder must still produce a usable job, and must say so.
 
-    The filter is for an upstream moviepy bug, not for anything here: when
-    ffmpeg refuses the input, ``FFMPEG_AudioReader.__init__`` raises before
-    setting ``self.proc`` and its ``__del__`` then trips over the missing
-    attribute. Undecodable bytes are the real path this test exists to cover,
-    so the warning is silenced rather than the path avoided.
+    ``decoder_available`` is patched because it reports a property of the
+    machine, not of the pipeline — this is the only way to stand on a host
+    without ffmpeg. Nothing under ``app/services/jobs/`` is otherwise stubbed:
+    the real ``voice.tts`` still runs and writes the bytes.
     """
-    store, job_id, asset = voiced(tmp_path, audio=[b"opaque-bytes-no-decoder-can-read"])
+    with patch.object(voice_adapter, "decoder_available", return_value=False):
+        store, job_id, asset = voiced(
+            tmp_path, audio=[b"opaque-bytes-no-decoder-can-read"]
+        )
     timeline = store.read_master_voice_timestamps(job_id)
 
     assert timeline["duration_source"] == "timeline"
     assert timeline["total_duration_ms"] == 3000
     assert asset.duration_ms == 3000
+
+
+@needs_decoder
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+def test_undecodable_audio_is_refused_when_a_decoder_exists(tmp_path):
+    """The drift check cannot see this failure, so it needs its own guard.
+
+    ``_measure`` uses the very decoder that failed inside the provider, so a
+    truncated download measures as 0.0 and would slip into the decoder-less
+    branch — believing the fabricated timeline that came with it. SiliconFlow
+    ships exactly this shape: undecodable bytes plus a flat one-second
+    timeline, reported as success.
+
+    The filter is for an upstream moviepy bug: when ffmpeg refuses the input,
+    ``FFMPEG_AudioReader.__init__`` raises before setting ``self.proc`` and its
+    ``__del__`` then trips over the missing attribute.
+    """
+    store, job = seeded(tmp_path)
+    voicing = start_voice_generating(job, store)
+
+    with edge(
+        audio=[b"truncated-download-that-is-not-audio" * 100],
+        boundaries=[{"offset": 0, "duration": TICKS_PER_SECOND, "text": "one"}],
+    ):
+        with pytest.raises(MasterVoiceError, match="decoder cannot read"):
+            generate_master_voice(voicing, store)
+
+    assert audio_assets(store, job.content_job_id) == []
+    assert store.read_master_voice_timestamps(job.content_job_id) is None
+    assert not (tmp_path / job.content_job_id / "audio" / "master-voice.mp3").exists()
+
+
+@needs_decoder
+def test_segments_never_end_after_the_duration_the_take_reports(tmp_path):
+    """An in-tolerance take can still decode shorter than its own timeline."""
+    store, job = seeded(tmp_path)
+    voicing = start_voice_generating(job, store)
+
+    # 3.0 s of audio, a timeline claiming 3.6 s: 17% drift, inside tolerance.
+    with edge(
+        audio=[wav_bytes(3.0)],
+        boundaries=[
+            {"offset": 0, "duration": 18 * TICKS_PER_SECOND // 10, "text": "first"},
+            {
+                "offset": 18 * TICKS_PER_SECOND // 10,
+                "duration": 18 * TICKS_PER_SECOND // 10,
+                "text": "second",
+            },
+        ],
+    ):
+        generate_master_voice(voicing, store)
+
+    timeline = store.read_master_voice_timestamps(job.content_job_id)
+    assert timeline["duration_source"] == "measured"
+    total = timeline["total_duration_ms"]
+    assert total < 3600
+    assert timeline["segments"]
+    assert max(s["end_ms"] for s in timeline["segments"]) <= total
+
+
+def test_a_crash_before_the_status_write_is_finished_on_rerun(tmp_path):
+    """The asset write and the status write are two steps.
+
+    A crash between them leaves every artifact on disk with the job still in
+    VOICE_GENERATING — and ``start_voice_generating`` refuses to re-enter that
+    status, so without this the job would be wedged for good.
+    """
+    store, job_id, asset = voiced(tmp_path)
+    rewound = store.load(job_id).job.model_copy(
+        update={"status": JobStatus.VOICE_GENERATING}
+    )
+    store.save(rewound)
+
+    with edge():
+        FakeCommunicate.constructed = 0
+        again = generate_master_voice(store.load(job_id).job, store)
+
+    assert again == asset
+    assert FakeCommunicate.constructed == 0
+    assert store.load(job_id).job.status is JobStatus.AWAITING_ASSETS
+    assert audio_assets(store, job_id) == [asset]
 
 
 # -- refusing to advance on a bad take -------------------------------------
@@ -372,6 +475,26 @@ def test_a_zero_byte_take_is_refused(tmp_path):
     with edge(audio=[]):
         with pytest.raises(MasterVoiceError):
             generate_master_voice(voicing, store)
+
+    assert audio_assets(store, job.content_job_id) == []
+    assert store.load(job.content_job_id).job.status is JobStatus.VOICE_GENERATING
+
+
+def test_a_zero_byte_take_is_refused_on_a_decoderless_host_too(tmp_path):
+    """The only path where the size check is load-bearing.
+
+    With a decoder present an empty file is caught downstream by "the decoder
+    cannot read this" — so without this test the size check can be deleted and
+    the suite stays green, while a host with no ffmpeg silently accepts a
+    zero-byte Master Voice.
+    """
+    store, job = seeded(tmp_path)
+    voicing = start_voice_generating(job, store)
+
+    with patch.object(voice_adapter, "decoder_available", return_value=False):
+        with edge(audio=[]):
+            with pytest.raises(MasterVoiceError, match="zero-byte"):
+                generate_master_voice(voicing, store)
 
     assert audio_assets(store, job.content_job_id) == []
     assert store.load(job.content_job_id).job.status is JobStatus.VOICE_GENERATING
@@ -448,7 +571,30 @@ def test_a_free_provider_records_a_known_zero_not_an_unknown(tmp_path):
     assert event.actual_cost_usd == 0.0
     ledger = reloaded.usage_ledger[-1]
     assert ledger.actual_cost_usd == 0.0
-    assert ledger.estimated_cost_source
+    # Graded on its content, not its truthiness: swapping the free and paid
+    # provenance strings has to fail something.
+    assert "unmetered" in ledger.estimated_cost_source
+    assert "ceiling" not in ledger.estimated_cost_source
+
+
+def test_a_free_provider_is_not_charged_against_the_budget(tmp_path):
+    """The gate's estimate must be the free 0.0, not the ceiling.
+
+    Headroom here is 0.01 — under the 0.05 paid ceiling — so a stage that
+    forgot the free branch would be refused before the provider was reached.
+    """
+    store, job = seeded(tmp_path)
+    priced = store.load(job.content_job_id).job.model_copy(
+        update={"budget_limit_usd": 0.01, "actual_cost_usd": 0.0}
+    )
+    store.save(priced)
+    voicing = start_voice_generating(store.load(job.content_job_id).job, store)
+
+    with edge():
+        generate_master_voice(voicing, store)
+
+    assert store.load(job.content_job_id).job.status is JobStatus.AWAITING_ASSETS
+    assert FakeCommunicate.constructed == 1
 
 
 def test_a_paid_provider_records_a_conservative_ceiling_and_unknown(tmp_path):

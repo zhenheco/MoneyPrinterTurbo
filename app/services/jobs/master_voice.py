@@ -208,6 +208,24 @@ def _park(job: ContentJob, store: JobStore, error: BaseException) -> None:
     )
 
 
+def _advance_to_awaiting_assets(job_id: str, store: JobStore) -> None:
+    """Hand a finished Master Voice over to asset import, at most once.
+
+    Conditional on the persisted status so it is safe to call from the
+    idempotency short circuit as well as from the happy path: a job already in
+    ``AWAITING_ASSETS`` is left alone, and one still in ``VOICE_GENERATING``
+    because a crash landed between the asset write and the status write is
+    finished rather than abandoned.
+    """
+    current = store.load(job_id).job
+    if current.status is not JobStatus.VOICE_GENERATING:
+        return
+    reason = "master voice and timeline created"
+    awaiting = transition(current, JobStatus.AWAITING_ASSETS, reason=reason)
+    store.save(awaiting)
+    store.append_decision(job_id, decision_record(current.status, awaiting, reason))
+
+
 def start_voice_generating(job: ContentJob, store: JobStore) -> ContentJob:
     """Move a planned job from ``SCENE_PLANNING`` to ``VOICE_GENERATING``."""
     record = store.load(job.content_job_id)
@@ -327,6 +345,12 @@ def generate_master_voice(job: ContentJob, store: JobStore) -> AssetRecord:
                 "master voice asset is recorded but its timeline is missing",
                 retryable=False,
             )
+        # The artifacts are complete, so finish the handover if the crash
+        # landed between appending the asset and saving the new status —
+        # otherwise this short circuit would return happily forever while the
+        # job sat wedged in VOICE_GENERATING, which start_voice_generating
+        # refuses to re-enter.
+        _advance_to_awaiting_assets(job_id, store)
         return asset
 
     if record.job.status is not JobStatus.VOICE_GENERATING:
@@ -437,10 +461,5 @@ def generate_master_voice(job: ContentJob, store: JobStore) -> AssetRecord:
         timeline_document(content_job_id=job_id, asset_id=asset.asset_id, take=take),
     )
     store.append_event(job_id, asset)
-
-    ready = store.load(job_id).job
-    reason = "master voice and timeline created"
-    awaiting = transition(ready, JobStatus.AWAITING_ASSETS, reason=reason)
-    store.save(awaiting)
-    store.append_decision(job_id, decision_record(ready.status, awaiting, reason))
+    _advance_to_awaiting_assets(job_id, store)
     return asset
