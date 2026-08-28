@@ -318,8 +318,26 @@ CANCELLED
 | 任一階段 | MANUAL_ACTION_REQUIRED | 缺少人工素材、登入或決策 |
 | 任一生成階段 | BUDGET_EXCEEDED | 預估成本超出 Job budget |
 | 任一未完成階段 | CANCELLED | 使用者主動取消 |
+| RETRYABLE_FAILED | 該次失敗的可恢復階段 | 重試上限未超過，且返回目標可由 `decisions.jsonl` 推導 |
+| RETRYABLE_FAILED | FAILED | Job 層級重試耗盡 |
+| MANUAL_ACTION_REQUIRED | 該次中斷的可恢復階段 | 人工處理完成，且返回目標可由 `decisions.jsonl` 推導 |
 
 V0 不應直接從任何狀態進入 PUBLISHED。APPROVED、SCHEDULED 與 PUBLISHED 只保留給後續受控發布流程。
+
+上表用類別名稱指涉多個狀態，此處逐一列出，讀者不需離開本 SPEC 就能重建整張表：
+
+- 任一可重試階段（8）：RESEARCHING、SCRIPTING、SCENE_PLANNING、VOICE_GENERATING、IMAGE_GENERATING、VIDEO_GENERATING、RENDERING、POSTIZ_DRAFTING。
+- 任一生成階段（7）：RESEARCHING、SCRIPTING、SCENE_PLANNING、VOICE_GENERATING、IMAGE_GENERATING、VIDEO_GENERATING、READY_TO_RENDER。READY_TO_RENDER 本身不生成，但它的 §5.2 條件含「預算閘門通過」，閘門在該狀態被評估，因此需要一個 BUDGET_EXCEEDED 出口。
+- 任一階段：除 PUBLISHED、FAILED、CANCELLED 與 MANUAL_ACTION_REQUIRED 本身以外的所有狀態。
+- 任一未完成階段：除 PUBLISHED、FAILED、CANCELLED 以外的所有狀態。
+- 該次失敗的可恢復階段（6）：RESEARCHING、SCRIPTING、VOICE_GENERATING、IMAGE_GENERATING、VIDEO_GENERATING、RENDERING。即「任一可重試階段」扣掉 POSTIZ_DRAFTING 與 SCENE_PLANNING。
+- 該次中斷的可恢復階段（4）：SCRIPTING、VOICE_GENERATING、AWAITING_ASSETS、READY_TO_RENDER。前三個是會停到 MANUAL_ACTION_REQUIRED、且有返回列的階段；READY_TO_RENDER 是本節指定的預算閘門落點，重新進入不產生任何 provider 成本。
+- POSTIZ_DRAFTING 不是返回目標：§5.3 要求 resume 必須使用 idempotency key，而目前的 Postiz 發布路徑不讀取 idempotency key，重新進入會建立第二份 Draft。等該路徑改為讀取並比對 idempotency key，即可加入。
+- SCENE_PLANNING 不屬於任何一個返回目標集合：Scene Planner 在既有 Scene 與重新推導的結果不一致時會整批替換，而重新推導出的 Scene 一律帶空的素材參照，人工補入的素材因此被抹掉——那正是這兩條返回列要保住的東西。同一個機制對兩條列都成立，所以兩邊一起排除，而不是只擋人工那條。代價是規劃階段停駐的 Job 目前只能取消，或繞道 SCRIPTING 重做（那一樣會重新規劃）。等 Planner 改為合併而非替換，兩邊一起加入。
+- BUDGET_EXCEEDED 沒有任何返回列，恢復路徑固定是兩跳：先 BUDGET_EXCEEDED → MANUAL_ACTION_REQUIRED，再由該狀態返回。這是產品決定，用狀態機把人工檢查點做成結構性的，不是從「不得自動繼續生成」推導出來的——該條禁止的是自動續跑，不是返回列本身。返回之後預算閘門仍會重跑：真正擋住支出的是閘門，不是這張表。目前閘門實際只在 SCRIPTING 與 VOICE_GENERATING 兩處評估，READY_TO_RENDER 是本節已寫入、尚未實作的第三處；三者都在返回目標集合內，所以兩跳對每個閘門位置都收斂。
+- 返回目標的推導：由後往前走 `decisions.jsonl`，取檔案順序而非時間欄位順序。每一筆記錄若 `to` 等於目前狀態就取它的 `from`，否則取它的 `to`；`from` 與 `to` 相同的記錄是拒絕留痕、不是移動，略過；落在 RETRYABLE_FAILED、MANUAL_ACTION_REQUIRED 或 BUDGET_EXCEEDED 的候選是連鎖停駐，繼續往前走。推導不得猜測，下列情況一律拒絕並要求人工判斷：記錄缺 `from`／`to` 或帶未知狀態、決策紀錄為空、走完整份紀錄仍找不到非停駐階段、推導出的階段不在上表允許的返回集合內。
+- 上面兩條返回列是必要條件而非充分條件：呼叫端必須先推導出返回目標，不得自行挑一個合法目標。RETRYABLE_FAILED → FAILED 不是返回列，沒有推導對象。
+- 推導回答的是「回哪裡」，不是「可不可以回」。RETRYABLE_FAILED 允許自動 resume，上限由 §5.3 的重試規則與 §10 的預算閘門把關；MANUAL_ACTION_REQUIRED 必須由人工觸發，這正是該狀態名稱的意思。
 
 ### 5.3 重試與 fallback
 
@@ -593,6 +611,7 @@ if actual_cost_usd + estimated_cost_usd > budget_limit_usd:
 - 最多 3 個 generated_video Scene。
 - Budget Guard 在超額前阻止 Provider。
 - State Transition 拒絕非法跳轉。
+- 停駐 Job 的返回目標由 `decisions.jsonl` 推導，並在紀錄為空、格式錯誤、無非停駐階段或推導結果不在返回集合時拒絕而非猜測。
 - Idempotency 防止重複生成與重複 Draft。
 - Asset Validation 拒絕錯誤 MIME、尺寸、時長與 checksum。
 - Creator Profile 驗證 explicit consent、expiry／revocation 與 manual review。
@@ -687,5 +706,6 @@ V0 不把 Cloudflare 當作必要條件。若 V0 通過，V1 才評估 Workers�
 - Qwen assisted 素材匯入的人工工作台與目錄。
 - 是否保留所有失敗生成素材與 storage retention。
 - 是否把現有 Upload-Post 流程標記為 deprecated，或只在 V0 adapter 層禁用。
+- 人工核可的 resume 是否重置該階段的重試計數，若重置由什麼 audit trail 記錄。
 
 > 本 SPEC 完成後仍未進行功能程式修改；等待 PRD 與 SPEC 核准。

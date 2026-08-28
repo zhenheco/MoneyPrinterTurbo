@@ -187,9 +187,11 @@ def _existing_voice_assets(record) -> List[AssetRecord]:
 def _park(job: ContentJob, store: JobStore, error: BaseException) -> None:
     """Move an unrecoverable job to ``MANUAL_ACTION_REQUIRED``.
 
-    A retryable failure deliberately stays put: §5.2 gives ``RETRYABLE_FAILED``
-    no edge back into any generating stage, so transitioning there would make a
-    recoverable failure permanent. Same product decision as
+    A retryable failure deliberately stays put. §5.2 does now return
+    ``RETRYABLE_FAILED`` to ``VOICE_GENERATING``, so parking there would no
+    longer strand the job; staying in ``VOICE_GENERATING`` is simply what this
+    module does today — the caller retries in place, and moving to the
+    park-and-resume shape is a separate slice. Same product decision as
     ``pipeline._persist_failed_status``.
     """
     classification = classify_error(error)

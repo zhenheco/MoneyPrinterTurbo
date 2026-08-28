@@ -22,10 +22,12 @@ from app.services.jobs.state_machine import (
     BudgetExceededError,
     ErrorClass,
     IllegalTransitionError,
+    ResumeError,
     UnauthorizedAssetError,
     classify_error,
     decision_record,
     is_legal,
+    resume_target,
     transition,
 )
 from app.services.jobs.store import JobStore, JobStoreError
@@ -73,6 +75,29 @@ GENERATING_SOURCES = [
     S.VOICE_GENERATING,
     S.IMAGE_GENERATING,
     S.VIDEO_GENERATING,
+    S.READY_TO_RENDER,
+]
+
+#: SPEC-001 §5.2 row "RETRYABLE_FAILED → 該次失敗的可恢復階段" — 任一可重試階段
+#: minus POSTIZ_DRAFTING, which re-entry would bill twice because the publisher
+#: reads no idempotency key, and minus SCENE_PLANNING for the reason below.
+RESUMABLE_TARGETS = [
+    S.RESEARCHING,
+    S.SCRIPTING,
+    S.VOICE_GENERATING,
+    S.IMAGE_GENERATING,
+    S.VIDEO_GENERATING,
+    S.RENDERING,
+]
+
+#: SPEC-001 §5.2 row "MANUAL_ACTION_REQUIRED → 該次中斷的可恢復階段" — the three
+#: stages that actually park there, plus READY_TO_RENDER, the budget gate's
+#: refusal landing spot. SCENE_PLANNING is in neither return set: re-entry
+#: rebuilds the scene list and discards human-imported assets.
+MANUAL_RETURN_TARGETS = [
+    S.SCRIPTING,
+    S.VOICE_GENERATING,
+    S.AWAITING_ASSETS,
     S.READY_TO_RENDER,
 ]
 
@@ -173,14 +198,17 @@ def expected_edges():
         for s in ALL_STATES
         if s not in TERMINAL and s is not S.MANUAL_ACTION_REQUIRED
     }
+    edges |= {(S.RETRYABLE_FAILED, t) for t in RESUMABLE_TARGETS}
+    edges.add((S.RETRYABLE_FAILED, S.FAILED))
+    edges |= {(S.MANUAL_ACTION_REQUIRED, t) for t in MANUAL_RETURN_TARGETS}
     return edges
 
 
 class TestTheWholeTableExhaustively:
     """§5.2 must hold edge for edge: an extra edge is as wrong as a missing one."""
 
-    def test_the_spec_allows_exactly_sixty_five_edges(self):
-        assert len(expected_edges()) == 65
+    def test_the_spec_allows_exactly_seventy_six_edges(self):
+        assert len(expected_edges()) == 76
 
     @pytest.mark.parametrize("from_status", ALL_STATES)
     def test_every_pair_of_states_matches_the_spec(self, from_status):
@@ -524,3 +552,202 @@ class TestTransitionWithTheStore:
         assert len(reloaded.scenes) == 3
         assert reloaded.script is not None
         assert reloaded.render_manifest is not None
+
+
+def line(from_status, to_status, reason="test"):
+    """One ``decisions.jsonl`` record, shaped exactly like ``decision_record``."""
+    return {
+        "from": from_status.value,
+        "to": to_status.value,
+        "reason": reason,
+        "at": "2026-08-16T09:00:00+00:00",
+    }
+
+
+class TestResumeTarget:
+    """Which stage a parked job goes back to, derived from its decision log."""
+
+    def test_a_retryable_failure_returns_to_the_stage_that_failed(self):
+        decisions = [
+            line(S.DRAFT, S.SCRIPTING),
+            line(S.SCRIPTING, S.SCENE_PLANNING),
+            line(S.SCENE_PLANNING, S.VOICE_GENERATING),
+            line(S.VOICE_GENERATING, S.RETRYABLE_FAILED),
+        ]
+
+        assert resume_target(S.RETRYABLE_FAILED, decisions) == S.VOICE_GENERATING
+
+    def test_a_manual_park_returns_to_the_stage_that_was_interrupted(self):
+        decisions = [
+            line(S.VOICE_GENERATING, S.AWAITING_ASSETS),
+            line(S.AWAITING_ASSETS, S.MANUAL_ACTION_REQUIRED),
+        ]
+
+        assert resume_target(S.MANUAL_ACTION_REQUIRED, decisions) == S.AWAITING_ASSETS
+
+    def test_a_status_string_is_accepted_like_everywhere_else(self):
+        decisions = [line(S.RENDERING, S.RETRYABLE_FAILED)]
+
+        assert resume_target("RETRYABLE_FAILED", decisions) == S.RENDERING
+
+    def test_the_park_lines_from_wins_when_its_own_advance_was_never_logged(self):
+        # store.save() runs before store.append_decision(); a crash between the
+        # two leaves job.json advanced with no line for it. Reading the previous
+        # line's "to" here would answer SCENE_PLANNING, which is not a return
+        # target at all - so this shape is caught, but only by the return-set
+        # check. The next test is the one that pins the rule itself.
+        decisions = [
+            line(S.DRAFT, S.SCRIPTING),
+            line(S.SCRIPTING, S.SCENE_PLANNING),
+            line(S.VOICE_GENERATING, S.RETRYABLE_FAILED),
+        ]
+
+        assert resume_target(S.RETRYABLE_FAILED, decisions) == S.VOICE_GENERATING
+
+    def test_the_unlogged_advance_is_caught_even_when_the_wrong_answer_is_legal(self):
+        # The same crash window on the master-voice advance: AWAITING_ASSETS was
+        # saved but never logged, and the captions stage then parked from it.
+        # Reading the previous line's "to" answers VOICE_GENERATING, which *is*
+        # a legal manual return target - a wrong answer no table check can catch.
+        decisions = [
+            line(S.SCENE_PLANNING, S.VOICE_GENERATING),
+            line(S.AWAITING_ASSETS, S.MANUAL_ACTION_REQUIRED, reason="no timeline"),
+        ]
+
+        assert resume_target(S.MANUAL_ACTION_REQUIRED, decisions) == S.AWAITING_ASSETS
+
+    def test_a_no_op_refusal_trace_is_not_a_movement(self):
+        # budget.check_budget and the Postiz refusal paths log from == to when a
+        # call was blocked without the job moving. Reading that line as a
+        # movement here would answer SCENE_PLANNING, which is not a return target.
+        decisions = [
+            line(S.VOICE_GENERATING, S.AWAITING_ASSETS),
+            line(S.AWAITING_ASSETS, S.MANUAL_ACTION_REQUIRED),
+            line(S.SCENE_PLANNING, S.SCENE_PLANNING, reason="budget guard refused"),
+        ]
+
+        assert resume_target(S.MANUAL_ACTION_REQUIRED, decisions) == S.AWAITING_ASSETS
+
+    def test_chained_parks_are_walked_past_one_after_another(self):
+        decisions = [
+            line(S.SCENE_PLANNING, S.VOICE_GENERATING),
+            line(S.VOICE_GENERATING, S.BUDGET_EXCEEDED),
+            line(S.BUDGET_EXCEEDED, S.MANUAL_ACTION_REQUIRED),
+        ]
+
+        assert resume_target(S.MANUAL_ACTION_REQUIRED, decisions) == S.VOICE_GENERATING
+
+    def test_budget_exceeded_is_refused_and_points_at_the_two_hop_path(self):
+        decisions = [line(S.VOICE_GENERATING, S.BUDGET_EXCEEDED)]
+
+        with pytest.raises(ResumeError) as raised:
+            resume_target(S.BUDGET_EXCEEDED, decisions)
+
+        message = str(raised.value)
+        assert "BUDGET_EXCEEDED" in message
+        assert "MANUAL_ACTION_REQUIRED" in message
+
+    @pytest.mark.parametrize(
+        "status", [s for s in ALL_STATES if s not in [S.RETRYABLE_FAILED, S.MANUAL_ACTION_REQUIRED]]
+    )
+    def test_a_job_that_is_not_parked_has_nothing_to_resume(self, status):
+        decisions = [line(S.SCENE_PLANNING, S.VOICE_GENERATING)]
+
+        with pytest.raises(ResumeError):
+            resume_target(status, decisions)
+
+    def test_an_empty_decision_log_is_refused(self):
+        # DRAFT -> MANUAL_ACTION_REQUIRED is legal but only start_scripting
+        # writes the first line, so a parked job with no log is reachable.
+        with pytest.raises(ResumeError) as raised:
+            resume_target(S.MANUAL_ACTION_REQUIRED, [])
+
+        assert "empty" in str(raised.value)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"to": "RETRYABLE_FAILED", "reason": "no from"},
+            {"from": "VOICE_GENERATING", "reason": "no to"},
+            {"from": "VOICE_GENERATING", "to": "NOT_A_STATE"},
+            {"from": "NOT_A_STATE", "to": "RETRYABLE_FAILED"},
+        ],
+    )
+    def test_a_malformed_record_is_refused_rather_than_skipped(self, bad):
+        # The line below it would answer SCRIPTING if malformed records were skipped.
+        decisions = [line(S.DRAFT, S.SCRIPTING), bad]
+
+        with pytest.raises(ResumeError):
+            resume_target(S.RETRYABLE_FAILED, decisions)
+
+    def test_a_log_with_no_stage_in_it_is_refused(self):
+        decisions = [line(S.BUDGET_EXCEEDED, S.MANUAL_ACTION_REQUIRED)]
+
+        with pytest.raises(ResumeError):
+            resume_target(S.MANUAL_ACTION_REQUIRED, decisions)
+
+    def test_a_stage_the_table_does_not_return_to_is_refused(self):
+        # SCENE_PLANNING parks like any other stage but is deliberately not a
+        # MANUAL_ACTION_REQUIRED return target.
+        decisions = [
+            line(S.SCRIPTING, S.SCENE_PLANNING),
+            line(S.SCENE_PLANNING, S.MANUAL_ACTION_REQUIRED),
+        ]
+
+        with pytest.raises(ResumeError) as raised:
+            resume_target(S.MANUAL_ACTION_REQUIRED, decisions)
+
+        message = str(raised.value)
+        assert "MANUAL_ACTION_REQUIRED" in message
+        assert "SCENE_PLANNING" in message
+
+    def test_postiz_drafting_is_refused_as_a_retryable_return_target(self):
+        decisions = [
+            line(S.READY_FOR_REVIEW, S.POSTIZ_DRAFTING),
+            line(S.POSTIZ_DRAFTING, S.RETRYABLE_FAILED),
+        ]
+
+        with pytest.raises(ResumeError):
+            resume_target(S.RETRYABLE_FAILED, decisions)
+
+    def test_the_log_is_walked_in_file_order_not_in_at_order(self):
+        # "at" is job.updated_at, and transition() lets a caller stamp it, so it
+        # is not guaranteed monotonic. Sorting by it walks back into the DRAFT
+        # line and answers SCRIPTING - a legal return target, and the wrong one.
+        decisions = [
+            {**line(S.DRAFT, S.SCRIPTING), "at": "2026-08-16T11:00:00+00:00"},
+            {**line(S.SCRIPTING, S.VOICE_GENERATING), "at": "2026-08-16T09:00:00+00:00"},
+            {**line(S.VOICE_GENERATING, S.RETRYABLE_FAILED), "at": "2026-08-16T10:00:00+00:00"},
+        ]
+
+        assert resume_target(S.RETRYABLE_FAILED, decisions) == S.VOICE_GENERATING
+
+    @pytest.mark.parametrize(
+        "status, terminal",
+        [
+            (S.MANUAL_ACTION_REQUIRED, S.CANCELLED),
+            (S.RETRYABLE_FAILED, S.CANCELLED),
+            (S.RETRYABLE_FAILED, S.FAILED),
+        ],
+    )
+    def test_a_terminal_state_is_never_handed_back_as_a_return_stage(
+        self, status, terminal
+    ):
+        # CANCELLED and FAILED are legal moves out of a parked job, so a check
+        # against the whole §5.2 row would accept them and let a caller asked to
+        # restart the job silently kill it instead.
+        decisions = [line(S.RENDERING, terminal)]
+
+        with pytest.raises(ResumeError) as raised:
+            resume_target(status, decisions)
+
+        assert terminal.value in str(raised.value)
+
+    @pytest.mark.parametrize("job_id", ["three-scene-demo", "ten-scene-demo"])
+    def test_the_frozen_fixtures_are_not_parked_so_they_are_refused(self, job_id):
+        store = JobStore(FIXTURES_ROOT)
+        record = store.load(job_id)
+
+        assert record.job.status == S.READY_TO_RENDER
+        with pytest.raises(ResumeError):
+            resume_target(record.job.status, record.decisions)
