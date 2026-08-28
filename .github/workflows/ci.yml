@@ -109,3 +109,20 @@ jobs:
           test/services/test_task_manager.py
           test/services/test_upload_post.py
           test/services/test_controller_video.py
+
+      # The job pipeline writes and reads a directory tree per job, so it is the
+      # part of this repository most exposed to Windows path semantics —
+      # separators, path containment checks, and reserved characters in ids.
+      # These tests are pure filesystem + pydantic work with no Redis, no
+      # network and no ffmpeg, so they are cheap to run here and this is the
+      # only job that would ever catch a POSIX-only assumption in them.
+      - name: Run job pipeline tests
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -q
+          test/services/test_content_job_models.py
+          test/services/test_job_store.py
+          test/services/test_job_state_machine.py
+          test/services/test_job_budget.py
+          test/services/test_job_pipeline.py
+          test/services/test_job_scene_planner.py
+          test/services/test_job_postiz.py
