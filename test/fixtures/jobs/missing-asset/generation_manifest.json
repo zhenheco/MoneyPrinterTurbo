@@ -1,0 +1,40 @@
+{
+  "content_job_id": "missing-asset",
+  "image_mode": "assisted_qwen",
+  "video_mode": "manual_google_flow",
+  "max_generated_video_scenes": 3,
+  "generated_video_scene_count": 0,
+  "entries": [
+    {
+      "scene_id": "scene-001",
+      "scene_index": 1,
+      "semantic_purpose": "hook",
+      "visual_type": "generated_image",
+      "fallback_type": "image_motion",
+      "generation_required": true,
+      "provider": "qwen_code_plan",
+      "prompt": "空蕩的會議室，桌上散落便利貼，冷色調側光",
+      "narration": "遠端第一年，我們的會議變多了，決策卻變慢了。",
+      "duration_target_ms": 10000,
+      "import_dir": "scenes/scene-001/images",
+      "expected_filename": "scene-001.png",
+      "accepted_mime_types": ["image/png"]
+    },
+    {
+      "scene_id": "scene-002",
+      "scene_index": 2,
+      "semantic_purpose": "point",
+      "visual_type": "avatar",
+      "fallback_type": "title_card",
+      "generation_required": true,
+      "provider": "manual_google_flow",
+      "prompt": "主講人正面口播，淺景深書房背景",
+      "narration": "第一個盲點是把同步會議當成預設，任何小事都排一場會。",
+      "duration_target_ms": 10000,
+      "import_dir": "scenes/scene-002/videos",
+      "expected_filename": "scene-002.mp4",
+      "accepted_mime_types": ["video/mp4"]
+    }
+  ],
+  "created_at": "2026-08-20T09:20:00+00:00"
+}

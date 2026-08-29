@@ -715,7 +715,9 @@ class TestFrozenFixtures:
             status.value for status in JobStatus
         }
 
-    @pytest.mark.parametrize("job_id", ("three-scene-demo", "ten-scene-demo"))
+    @pytest.mark.parametrize(
+        "job_id", ("three-scene-demo", "ten-scene-demo", "missing-asset")
+    )
     def test_fixture_carries_no_credentials(self, job_id):
         job_dir = FIXTURES_ROOT / job_id
         forbidden = ("authorization", "bearer ", "api_key", "sk-", "secret", "token")

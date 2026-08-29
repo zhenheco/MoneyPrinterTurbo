@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-002",
+  "content_job_id": "missing-asset",
+  "scene_index": 2,
+  "semantic_purpose": "point",
+  "narration": "第一個盲點是把同步會議當成預設，任何小事都排一場會。",
+  "caption": "別把開會當預設",
+  "duration_target_ms": 10000,
+  "visual_type": "avatar",
+  "visual_prompt": "主講人正面口播，淺景深書房背景",
+  "reference_assets": [],
+  "generation_required": true,
+  "provider": "manual_google_flow",
+  "provider_model": "",
+  "fallback_type": "title_card",
+  "attempt_count": 1,
+  "status": "AWAITING_ASSETS"
+}

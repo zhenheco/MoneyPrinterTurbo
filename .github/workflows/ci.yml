@@ -134,3 +134,4 @@ jobs:
           test/services/test_job_postiz.py
           test/services/test_job_master_voice.py
           test/services/test_job_captions.py
+          test/services/test_job_asset_import.py
