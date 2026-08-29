@@ -1,0 +1,59 @@
+{
+  "content_job_id": "budget-exceeded",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "pixel_format": "yuv420p"
+  },
+  "audio": {
+    "mode": "master_voice",
+    "master_voice_asset_id": "asset-voice-001",
+    "sample_rate": 48000,
+    "codec": "aac"
+  },
+  "scenes": [
+    {
+      "scene_id": "scene-001",
+      "asset_id": "asset-001",
+      "start_ms": 0,
+      "end_ms": 6000,
+      "motion": {
+        "type": "ken_burns",
+        "scale_start": 1.0,
+        "scale_end": 1.08
+      },
+      "caption_ref": "caption-001"
+    },
+    {
+      "scene_id": "scene-002",
+      "asset_id": "asset-002",
+      "start_ms": 6000,
+      "end_ms": 28000,
+      "motion": {
+        "type": "none",
+        "scale_start": null,
+        "scale_end": null
+      },
+      "caption_ref": "caption-002"
+    },
+    {
+      "scene_id": "scene-003",
+      "asset_id": "asset-003",
+      "start_ms": 28000,
+      "end_ms": 50000,
+      "motion": {
+        "type": "ken_burns",
+        "scale_start": 1.0,
+        "scale_end": 1.08
+      },
+      "caption_ref": "caption-003"
+    }
+  ],
+  "subtitle_asset_id": "asset-subtitle-001",
+  "output": {
+    "container": "mp4",
+    "video_codec": "h264",
+    "audio_codec": "aac"
+  }
+}

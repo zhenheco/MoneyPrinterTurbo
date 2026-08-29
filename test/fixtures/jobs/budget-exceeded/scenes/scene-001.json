@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-001",
+  "content_job_id": "budget-exceeded",
+  "scene_index": 1,
+  "semantic_purpose": "hook",
+  "narration": "九成企業導入 AI 的第一步就走錯了。",
+  "caption": "九成企業第一步就走錯",
+  "duration_target_ms": 6000,
+  "visual_type": "generated_image",
+  "visual_prompt": "現代辦公室桌面，散落的文件與筆電，戲劇性側光",
+  "reference_assets": [],
+  "generation_required": true,
+  "provider": "qwen_code_plan",
+  "provider_model": "",
+  "fallback_type": "image_motion",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}

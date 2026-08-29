@@ -65,6 +65,8 @@
 | 10 | Postiz Draft adapter | `PostizPublisher.create_draft`（mock HTTP session 測試）+ draft-only 強制（publish_now/auto_upload 一律拒絕）+ POSTIZ_DRAFTING→POSTIZ_DRAFTED | mock 只建 draft；公開發布請求被拒；draft_id 寫回 job | §6.4 FR-009 | 2,3 | M |
 | 11 | `run --job` 可恢復全流程 + golden fixtures 收尾 | 端到端 orchestrator 串 4~10；中斷後 resume；補齊 `video-provider-timeout`/`budget-exceeded`/`render-failure` fixtures 與 integration tests；scene fallback（重試 1 次→image_motion） | §12 Integration 六條全綠；一次本機真實 demo：topic→…→final.mp4→mock draft | §5.3 §13 Phase 2 FR-006 | 4–10 | M |
 
+**11 張全部完成（2026-08-30）。** #11 交付 `app/services/jobs/runner.py`（依 `job.json` 狀態派工的可恢復orchestrator）、`cli.py run --job`、`qa/technical-qa.json`、`TECHNICAL_QA → CONTENT_QA → READY_FOR_REVIEW → POSTIZ_DRAFTING` 三條邊（CONTENT_QA 為人工閘門）、`budget-exceeded` 與 `render-failure` 兩份 fixture，以及一支橫跨 `create_job` → mock Postiz draft 的 integration test。**兩項刻意未做**：scene fallback（重試 1 次→image_motion）與 `video-provider-timeout` fixture —— 兩者的觸發條件在 §6.6 video gate 關閉下都不可達，理由與量測記在 SPEC-001 §15 與 `docs/HANDOFF-v0-job-pipeline.md`。
+
 順序即依賴序。#3/#10 可與相鄰 issue 並行。總量：2L + 7M + 2S。
 註：V0 vertical slice 不含 automated image/video provider 呼叫（全走人工匯入），所以 §6 的 ImageProvider/VideoProvider automated contract 只需 Protocol 定義 + policy 拒絕測試（涵蓋在 #3/#8），不需真實 adapter。
 

@@ -152,6 +152,12 @@ Examples:
   Stop after script generation:
     uv run python cli.py --video-subject "How AI is changing everyday life" --stop-at script
 
+  Run one SPEC-001 job (resumable) and stop at the content-QA human gate:
+    uv run python cli.py run --job job-abc123
+
+  Run it again once a person has reviewed it:
+    uv run python cli.py run --job job-abc123 --content-qa-approved
+
 Pipeline stages:
   script     Generate or return the script.
   terms      Generate material search terms; unavailable with local materials.
@@ -467,7 +473,61 @@ Output and exit status:
         default=None,
         help="custom UUID used for storage/tasks/<task-id>; generated automatically when omitted",
     )
+    # SPEC-001 §9's last row, 可恢復完整流程 -> ``run --job``. Added *without*
+    # ``required=True`` on purpose: measured 2026-08-30, a subparser group that
+    # is not required coexists with the flat options above, so every existing
+    # invocation keeps parsing exactly as it did (``command`` is simply None).
+    subcommands = parser.add_subparsers(
+        dest="command",
+        metavar="COMMAND",
+        help="optional subcommand; omit it to run the classic flat pipeline",
+    )
+    run_parser = subcommands.add_parser(
+        "run",
+        help="drive one SPEC-001 job through the V0 pipeline, resuming if needed",
+        description=(
+            "Drive one job from its persisted status as far as it can go. "
+            "Content QA is a human gate: without a verdict the run stops at "
+            "TECHNICAL_QA. Postiz drafting needs a publisher, which this CLI "
+            "does not construct — V0 has no Postiz config keys."
+        ),
+        formatter_class=_CliHelpFormatter,
+    )
+    run_parser.add_argument(
+        "--job",
+        required=True,
+        help="content_job_id of the job to run",
+    )
+    run_parser.add_argument(
+        "--store",
+        default=None,
+        help="job store root directory (default: storage/jobs)",
+    )
+    run_parser.add_argument(
+        "--content-qa-approved",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "a human's PRD-001 FR-008 content QA verdict; "
+            "--no-content-qa-approved records a refusal. Omit it and the run "
+            "stops at TECHNICAL_QA for a person to look."
+        ),
+    )
+    run_parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        default=True,
+        action="store_false",
+        help="stop at a parked status instead of resuming it",
+    )
+
     args = parser.parse_args(argv)
+
+    # Everything below judges the flat pipeline's flags. A subcommand supplies
+    # none of them, so running it unconditionally would fail every ``cli.py run``
+    # on "one of --video-subject or --video-script is required".
+    if args.command is not None:
+        return args
 
     if not args.video_subject.strip() and not args.video_script.strip():
         parser.error("one of --video-subject or --video-script is required")
@@ -797,8 +857,61 @@ def prepare_cli_files(params: VideoParams, stop_at: str) -> None:
         material.url = prepared_path
 
 
+def run_job_command(args: argparse.Namespace) -> int:
+    """``cli.py run --job <id>``: SPEC-001 §9's 可恢復完整流程.
+
+    Exit codes match the flat pipeline's, documented in the epilog: 0 success,
+    1 the job needs a human or failed, 2 bad input. Exactly one JSON object
+    reaches stdout; loguru keeps stderr.
+
+    The imports are inside the function for the reason the module already
+    states for ``build_video_params``: importing ``app.services.jobs`` writes a
+    ``config.toml`` and creates ``storage/``, and ``cli.py --help`` must not.
+    """
+    from app.services.jobs.runner import RunnerError, run_job
+    from app.services.jobs.store import JobStore, JobStoreError
+    from app.utils import utils
+
+    root = args.store or utils.storage_dir("jobs", create=True)
+    try:
+        store = JobStore(root)
+        result = run_job(
+            args.job,
+            store,
+            content_qa_approved=args.content_qa_approved,
+            resume=args.resume,
+        )
+    except (JobStoreError, OSError) as exc:
+        # Bad input or an unusable store: the epilog's exit 2.
+        logger.error(f"cannot run job {args.job}: {exc}")
+        return 2
+    except RunnerError as exc:
+        # A job that will not converge is a task failure, not an argument error.
+        logger.error(f"job {args.job} did not converge: {exc}")
+        return 1
+
+    payload = {
+        "content_job_id": result.job.content_job_id,
+        "status": result.job.status.value,
+        "stopped_because": result.stopped_because,
+        "rounds": result.rounds,
+        "draft": result.draft,
+    }
+    if result.error is not None:
+        payload["error"] = f"{type(result.error).__name__}: {result.error}"
+        logger.error(f"job {args.job} failed: {payload['error']}")
+    print(json.dumps(payload, ensure_ascii=False))
+    # ``needs_a_human`` alone is not the failure condition: SPEC-001 §5.3 lets a
+    # retryable stage failure *stay put* rather than park, so a run that carries
+    # an error can end on a plain stage status. Exiting 0 there would tell cron
+    # a failed run succeeded.
+    return 1 if result.needs_a_human or result.error is not None else 0
+
+
 def run_cli(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.command == "run":
+        return run_job_command(args)
     try:
         params = build_video_params(args)
         prepare_cli_files(params, stop_at=args.stop_at)

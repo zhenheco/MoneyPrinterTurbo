@@ -1,6 +1,6 @@
 # Handoff：V0 Job Pipeline
 
-> 最後更新 2026-08-30。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
+> 最後更新 2026-08-30（issue #11 收尾）。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
 
 ## 1. 現在在哪
 
@@ -18,9 +18,10 @@ V0 job pipeline 的相關合併：
 | #12 | `35235c1` | issue #7：由時間軸產字幕 |
 | #13 | — | SPEC-001 §5.2 補邊 65→76 + `resume_target` 返回目標推導（見 §5） |
 | #14 | — | issue #8：Asset Import + Creator Profile preflight（見 §4.2） |
-| 本次 | — | issue #9：Render Manifest + Renderer + technical QA（見 §4.3） |
+| #15 | `41beee3` | issue #9：Render Manifest + Renderer + technical QA（見 §4.3） |
+| 本次 | — | issue #11：`run --job` 端到端 orchestrator + 兩份 golden fixture + technical QA report（見 §4.4） |
 
-PLAN-001 的 11 張 issue **做完 10 張**：#1 #2 #3 #4 #5 #6 #7 #8 #9 #10。只剩 **#11（`run --job` 端到端 + golden fixtures）**。
+PLAN-001 的 11 張 issue **全部完成**：#1 #2 #3 #4 #5 #6 #7 #8 #9 #10 #11。
 
 全部落在平行路徑 `app/services/jobs/`，**`app/services/task.py` 至今零修改**（上游熱區，侵入式修改會讓每次 merge upstream 都衝突 —— 見 PLAN-001 Q2）。
 
@@ -41,9 +42,10 @@ PLAN-001 的 11 張 issue **做完 10 張**：#1 #2 #3 #4 #5 #6 #7 #8 #9 #10。�
 | `app/services/jobs/asset_import.py` | issue #8：`import_assets` —— 對 manifest 驗收人工素材、寫 AssetRecord、creator profile preflight、`AWAITING_ASSETS → READY_TO_RENDER` |
 | `app/services/jobs/render_manifest.py` | issue #9：`build_render_manifest` —— 由磁碟上的文件建 §8 Render Manifest，外加 pydantic 模型做不到的語意驗證（**必讀 §4.3**） |
 | `app/services/jobs/render_adapter.py` | issue #9：隔離 `app/services/video.py` 的兩個假回傳值 + 用 ffmpeg stderr 讀實際串流。形狀同 `voice_adapter` / `media_probe`（**必讀 §4.3**） |
-| `app/services/jobs/renderer.py` | issue #9：`start_rendering` / `render_job` —— 預算閘門、渲染、technical QA、`READY_TO_RENDER → RENDERING → TECHNICAL_QA` |
+| `app/services/jobs/renderer.py` | issue #9：`start_rendering` / `render_job` —— 預算閘門、渲染、technical QA、`READY_TO_RENDER → RENDERING → TECHNICAL_QA`；issue #11 加寫 `qa/technical-qa.json` |
+| `app/services/jobs/runner.py` | issue #11：`run_job` —— 依 `job.json` 狀態派工的可恢復 orchestrator、`TECHNICAL_QA → CONTENT_QA → READY_FOR_REVIEW → POSTIZ_DRAFTING` 三條邊、人工內容 QA 閘門（**必讀 §4.4**） |
 
-測試基準（2026-08-30 實測）：**1672 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。（#9 之前是 1618；本次 +54 個測試，subtest 數不變。）
+測試基準（2026-08-30 實測，審查修復後）：**1717 passed / 11 skipped / 4172 subtests**，全套 163.42 秒，`ruff check` 全綠。（#11 之前是 1672；本次 +45 個測試，subtest 數不變。新增的 `test_job_runner.py` 單檔 36 tests / 55 秒 —— 其中 12 個要真 ffmpeg + 真 Edge TTS 網路，離線主機自動 skip，代價見 §13 第 4 條。）
 
 
 ## 2. 驗證現況（接手第一件事）
@@ -52,7 +54,7 @@ PLAN-001 的 11 張 issue **做完 10 張**：#1 #2 #3 #4 #5 #6 #7 #8 #9 #10。�
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1672 passed / 11 skipped / 4172 subtests
+.venv/bin/python -m pytest test -q                    # 1717 passed / 11 skipped / 4172 subtests
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
@@ -362,6 +364,122 @@ ffmpeg -hide_banner -nostdin -xerror -i FILE -f null -
 | `RENDERS_DIR = "renders"` / `render_output_path(job_id, extension)` / `render_output_relative_path(extension)` | 輸出路徑。形狀完全照抄 `master_voice_path`，包含 mkdir **之後**再驗一次 `_within_root` 與 `_EXTENSION_PATTERN` 驗證。`renders/` 跟 `audio/` 與 scene 媒體目錄一樣是**階段擁有、不在 `JobRecord` 裡**，所以 `replace()` 永遠刪不到它（有測試釘住） |
 | `asset_path(job_id, storage_key)` | **新增，而且是必要的**：在此之前 repo 裡沒有任何東西能把一個 `storage_key` 還原成路徑（§4.2 只說「它是資料，不要接字串」，沒給還原器）。拒絕絕對路徑、`..`、`.` 與反斜線，再走跟其他 helper 一樣的 `_within_root` realpath 證明。**renderer 是第一個必須打開別的階段產出的檔案的階段**，所以這個缺口本來就得補 |
 
+## 4.4 端到端 Runner + CLI（issue #11）
+
+`app/services/jobs/runner.py`。唯一知道**階段順序**的模組；每個 stage 自己的冪等、預算閘門與 park 行為都沒有動。
+
+### 派工規則：看 `job.json`，不看 `resume_target`
+
+**這是本條 slice 最重要的一個決定，而且它是量出來的。** 在 `store.save` 與 `store.append_decision` 之間砍掉 process，三個階段各測一次：
+
+| 砍在哪 | `job.json` | `decisions.jsonl` | `resume_target` |
+|---|---|---|---|
+| 進 `SCRIPTING` | `SCRIPTING` | 0 行 | `ResumeError: SCRIPTING is not a parked status` |
+| 進 `SCENE_PLANNING` | `SCENE_PLANNING` | 最後一行 `DRAFT→SCRIPTING` | 同上 |
+| 進 `AWAITING_ASSETS` | `AWAITING_ASSETS` | 少一行 | 同上 |
+
+也就是說：**崩潰會把 job 留在「階段」裡，而 `resume_target` 只回答 `RETRYABLE_FAILED` 與 `MANUAL_ACTION_REQUIRED` 這兩個停駐狀態。** 所以 runner 一律 dispatch 在持久化的 `job.json.status` 上，`decisions.jsonl` 只當輔助；只有停駐狀態才呼叫 `resume_target`，而且讓它拋而不是猜。`test_resume_target_cannot_answer_for_a_crashed_stage` 把這三格釘住了。
+
+順帶量到的兩件事：**丟掉的那一行永遠不會被補回來**，`decisions.jsonl` 會終身少一行；以及**刪掉 park 自己那一行會讓 `resume_target` 給出不同答案** —— save-then-append 這個窗口對 park 行本身也沒有保護。
+
+### 迴圈的終止條件
+
+`resume_target` 的 docstring 早就寫了：推導是全函式但不終止，實測 7 輪零進展、每輪 +302 bytes。所以：
+
+- 停在終端狀態；停在需要人的狀態（三個停駐狀態，以及沒有人工裁決時的 `TECHNICAL_QA`）；或**上一輪沒有進展**。
+- 「沒有進展」的定義是：**狀態沒變，而且該輪只追加了 `park → stage` 與緊接著的 `stage → park`**。不是「log 有沒有長大」—— 每輪都會長，`test_a_job_that_reparks_identically_stops_instead_of_spinning` 就是釘這一條的（它同時斷言 log 真的長了 2 行）。
+- **`from == to` 的行先被濾掉**。這不是假設性的：Postiz 的 draft-only 守衛每次拒絕都寫一行 `from == to` 的 refusal trace，第一版 runner 因此在 `POSTIZ_DRAFTING` 上跑滿 60 輪。
+- **resume 與它 resume 進去的那個階段跑在同一輪**，否則每個 park/resume 配對看起來都是兩次狀態改變，上面那個形狀永遠不會出現。
+- `MAX_ROUNDS = 60` 只是防呆兜底，不是終止條件本身。
+
+### 三條新邊，以及 CONTENT_QA 是人工閘門
+
+`TECHNICAL_QA → CONTENT_QA → READY_FOR_REVIEW → POSTIZ_DRAFTING` 在 §5.2 表上一直都在，但**在這條 slice 之前沒有任何 code 實作它們** —— 每個 postiz 測試都是硬設狀態繞過去的。
+
+FR-008 的內容 QA 那一半（繁中／Hook／核心觀點／結論／CTA／來源標記／**人工否決能力**）是 human-in-the-loop，**不得自動放行**。所以：
+
+- `run_job(...)` 不帶 `content_qa_approved` → 停在 `TECHNICAL_QA`，理由字串明講在等人。
+- `content_qa_approved=True` → 走完三條邊。
+- `content_qa_approved=False` → 記一行 `CONTENT_QA → MANUAL_ACTION_REQUIRED`（reason 含「人工否決」）並停下。**這個 park 沒有自動出路**：`CONTENT_QA` 不在 `MANUAL_RETURN_STAGES` 裡，所以是留給人的。
+- caption **不會被憑空發明**：規則是 `script.hook` + 空行 + `script.cta`（`Script` 沒有 caption 欄位，這兩個是實際存在的），呼叫端可用 `caption=` 覆寫。
+- `PostizSettings` 仍然沒有 config key，runner **不讀任何憑證**：publisher 由呼叫端建構，沒給就停在 `POSTIZ_DRAFTING` 並說明原因。
+
+### `qa/technical-qa.json`
+
+SPEC-001:644 要「可讀的 technical QA report」，而 `TechnicalQaResult` 的 `pixel_format` / `fps` / `audio_sample_rate` 過去是算出來就丟掉。現在 `renderer` 在**每一次** `technical_qa()` 之後（通過與失敗都寫）落一份 JSON：measured 與 expected 並排，所以讀的人分得出「渲染錯了」與「期望值寫錯了」。
+
+- 新 store helper：`QA_DIR` / `technical_qa_path` / `write_technical_qa` / `read_technical_qa`，形狀完全比照 `write_captions_document`。
+- **`qa/` 在 `JobRecord` 之外**，`store.replace()` 刪不到它，跟 `renders/` / `audio/` 同理。
+- **數字來自 ffmpeg，不是 ffprobe**（原因見 §4.2 / `render_adapter`）。report 裡有 `measured_with: "ffmpeg"` 與一段說明，檔名不會暗示一個從來沒跑過的工具。
+
+### 兩份新 fixture，以及刻意不做的第三份
+
+`test/fixtures/jobs/budget-exceeded/` 與 `test/fixtures/jobs/render-failure/` **都是跑真的 stage 產生出來再凍結的**，不是手寫 JSON：前者把 `budget_limit_usd` 壓到已花費金額之下再呼叫 `start_rendering`，後者在沒有素材的情況下呼叫 `render_job`（park 理由是實際的 `RenderError: the Master Voice audio is missing or empty`）。凍結時只保留 `*.json` / `*.jsonl`（fixture 不帶媒體位元組），並且**都加進了 `test_job_store.py` 那份硬編碼的憑證 grep 清單** —— repo 裡沒有任何測試會自動發現新 fixture 目錄，漏加就等於沒掃。兩份都**不放進 `EXPECTED_FIXTURES`**（它釘死 5 跳鏈與 render manifest），改用形狀不同的 `TestParkedFixtures`。
+
+**`video-provider-timeout` 沒有建立，而且不該建立。** `SCENE_PLANNING → VIDEO_GENERATING` 會拋 `IllegalTransitionError`（`VIDEO_GENERATING` 唯一的入邊來自 `RETRYABLE_FAILED`），所以它的 `decisions.jsonl` 會是一條狀態機自己拒絕產生的鏈 —— 一份 production 到不了的 fixture，配一個什麼都不證明的綠燈。`TestParkedFixtures::test_every_decision_is_a_legal_edge` 就是那條會擋下它的斷言。解除條件同 §6.6 gate。
+
+### Scene fallback：宣告為不可達，不實作也不假裝
+
+FR-006／§5.3 的「單一影片場景重試一次 → 降級為 image_motion」在 V0 **三個前提全部不存在**（2026-08-30 實測）：
+
+1. **沒有任何 Image/Video Provider 被呼叫。** `check_budget`／`record_usage` 的呼叫點只有 `pipeline`（LLM）、`master_voice`（TTS）與 `renderer`（render）三處；`asset_import` 的 docstring 自己就寫了它不做 provider 呼叫。這是 PLAN-001 Q6 / SPEC §6.6:484 —— gate 關閉，只走人工匯入。
+2. **狀態機沒有前向入邊。** `TRANSITIONS` 裡進得了 `VIDEO_GENERATING` 的來源只有 `RETRYABLE_FAILED`；job 可以被送**回**去，但一開始就到不了那裡。
+3. **`image_motion` 不是合法的 `VisualType`。** `Scene(visual_type="image_motion")` 直接 `ValidationError`。`Scene.fallback_type` 是一個沒有驗證的裸 `str`，`scene_planner` 寫進去之後**沒有任何人讀**。這條規則唯一能表達的形式是 `generated_image` + `ken_burns`（`render_manifest.KNOWN_MOTION_TYPES == {none, ken_burns}`），對應 PRD FR-006 的「靜態圖片＋推鏡／平移／局部縮放」。
+
+所以**不**交付一個休眠的純函式配一個手工組出來的 `RETRYABLE_FAILED` job 去跑它 —— 那正是這個專案已經犯過三次的錯：一條 production 走不到的路徑上的綠燈測試。改為在 SPEC-001 §15 記一條，處理方式與 `native_speech_avatar` 一致。
+
+### FR-006「不得中止」的判斷（寫在這裡，免得下一個人只看到違規）
+
+PRD-001:163-173 說「不得因單一 Scene 失敗而中止或重做整支影片」。一壞兩好的三場景實測：
+
+- `asset_import` → `AssetImportError`，job 停 `MANUAL_ACTION_REQUIRED`，已匯入的 `asset-scene-001` **保留**。
+- `renderer` → job 停 `RETRYABLE_FAILED`，`final.mp4` 不存在。
+
+**「不得重做」被遵守了**（兩個 stage 都保留部分成果、都冪等）。**「不得中止」被兩個 stage 刻意違反。** 判斷理由：FR-006 的主詞是 provider **生成**失敗，而 V0 從不生成；一個人手動放錯型別的檔案沒有已定義的降級行為，靜默跳過一個場景會產出一支和腳本對不上的影片。這是刻意的取捨，不是漏洞 —— gate 開啟、provider 真的會生成之後要重新判斷。
+
+### §12 Integration 記分板（本條 slice 之後）
+
+| SPEC 行 | 條目 | 狀態 | 由誰滿足 |
+|---|---|---|---|
+| :639 | 本機渲染完整流程 | ✅ | `test_job_runner.py::test_the_whole_arc_reaches_a_postiz_draft` + `::test_the_arc_walks_every_status_in_spec_5_2_order`（`create_job` → mock Postiz draft，只 stub `app.services.llm.OpenAI` 與 Postiz session） |
+| :640 | 缺素材安全暫停與 resume | ✅ | `test_job_asset_import.py:290` + `test_job_runner.py::test_the_missing_asset_pause_is_safe_and_resumable`（現在是在完整 arc 裡發生的） |
+| :641 | Video Provider timeout 後 Scene fallback | ❌ **不可達，刻意不做** | 無。三個前提全缺，見上面兩節與 SPEC-001 §15 |
+| :642 | Budget exceeded 不呼叫 Provider | ✅ | `test_job_budget.py:125`、`test_job_render.py:409`、`test_job_runner.py::test_budget_exceeded_never_reaches_the_renderer` + `::test_budget_exceeded_recovers_only_through_the_two_hop_path` |
+| :643 | Mock Postiz 只建立 Draft | ✅ | `test_job_postiz.py:412` 等 8 條，加上 `test_job_runner.py::test_the_draft_request_is_draft_only_and_carries_the_script_caption`（**經 runner 走到，不是硬設狀態**） |
+| :644 | ffprobe 產生可讀的 technical QA report | ✅ **但工具是 ffmpeg** | `test_job_runner.py::test_the_technical_qa_report_says_what_was_checked_and_what_was_found`；report 自己寫明 `measured_with: ffmpeg` 與原因 |
+
+**5 / 6。** 剩下那一條的解除條件是 §6.6 的 video gate。
+
+### CLI：`cli.py run --job`
+
+SPEC §9 的最後一列。`parser.add_subparsers(dest="command")`**不帶** `required=True`（實測與既有 40 個 flat flag 共存，`cli.py --video-subject x` 完全不變），並把那段**無條件執行**的 post-parse 驗證移到 `if args.command is not None: return args` 之後 —— 不移的話每一次 `cli.py run` 都會撞上 `one of --video-subject or --video-script is required`。
+
+- exit code 沿用既有約定：0 成功、1 job 需要人／失敗、2 參數或輸入錯誤。stdout 恰好一個 JSON 物件（`ensure_ascii=False`），loguru 只走 stderr。**「失敗」不等於「停駐」** —— 見下一節第 1 條。
+- **所有 `app.services.jobs` import 都在 handler 內部** —— import 那些模組會寫出一個 gitignored 的 `config.toml` 並建立 `storage/`，`cli.py --help` 不可以開始建檔（實測：import `cli.py` 不建檔，import 任一 jobs 模組會建）。
+- `--content-qa-approved` / `--no-content-qa-approved`（`BooleanOptionalAction`，預設 `None` = 沒人看過）。**CLI 建不了 Postiz draft**：V0 沒有 Postiz config key，所以 CLI 跑到 `POSTIZ_DRAFTING` 就停並說明原因。這是誠實的，不是缺陷。
+- 測試是直接呼叫 parser 與 handler，不 shell out。
+
+### 三個攻擊視角修掉的六件事（mutation / safety / spec）
+
+這條 slice 交出去之後跑了三份獨立審查。以下每一條都是**實跑重現**過的，不是讀碼推論：
+
+1. **`cli.py run --job` 對「失敗但沒停駐」的 job 回 exit 0。** `needs_a_human` 只看三個停駐狀態，但 SPEC §5.3 允許可重試失敗**留在原地**（`generate_script` 逾時就是這樣，job 留在 `SCRIPTING`）。payload 裡帶著 `"error"`，shell 卻收到成功。現在是 `result.needs_a_human or result.error is not None`。同時 `RunnerError`（不收斂）從 exit 2 改成 exit 1 —— epilog 把 2 保留給參數錯誤。`test_a_failure_that_does_not_park_still_exits_one` / `test_a_job_that_will_not_converge_exits_one_not_two`。
+2. **同一個 job 沒有任何鎖。** 兩條 thread 同時 `run_job` 實測產生**兩份 Postiz draft**與**兩次付費 LLM 呼叫**，兩邊都認為自己成功，重複的 hop 永久留在 `decisions.jsonl` 裡。`cli.py run --job` 是可重複的自動化入口，cron 撞上手動執行是常態不是例外。現在 `run_job` 在 job 目錄開一個 `O_EXCL` 的 `.runner.lock`，第二個 runner 收到 `JobBusyError` 而不是再花一次錢。**刻意不做 timeout**：猜對方死了，正是會產生重複草稿的那個猜測；殘留的鎖由人刪。
+3. **重跑會建立第二份 Postiz draft。** `RESUMABLE_STAGES` 排除 `POSTIZ_DRAFTING` 就是為了防這件事，runner 卻從正門走進同一個狀態。而且 Postiz **在線路上不送 idempotency key**（`build_idempotency_key` 只寫進本地 provider event）。實測：第一次 POST 拿到 200 但 body 讀不出 draft id → job 留在 `POSTIZ_DRAFTING`；再跑一次就 POST 第二遍。現在只要 `provider_events.jsonl` 裡有**任何** postiz 事件，runner 就拒絕再 POST 並要人去 Postiz 上確認。**條件是「有沒有嘗試過」不是「有沒有拿到 draft id」** —— 最需要這道守衛的正是拿不到 id 的那次。
+4. **0 byte 的 `final.mp4` 會被送去建草稿。** 渲染與草稿之間沒有任何人重新檢查那個檔案，`postiz._draft_request` 只做 `os.path.isfile`。`renders/` 又是明文允許人手動碰的目錄。現在 `POSTIZ_DRAFTING` 那一段會先要求檔案存在且非空。**注意這只擋得住截斷成 0**：`qa/technical-qa.json` 寫了卻**沒有任何 production code 讀它**，見 §11 未決問題。
+5. **人工否決之後沒有出路，而且沒有人講。** `--no-content-qa-approved` 把 job 停在 `MANUAL_ACTION_REQUIRED`，park 的 `from` 是 `CONTENT_QA`，`resume_target` 永遠回答不了它（`CONTENT_QA` 不是 §5.2 的返回目標）。**耐久性是對的** —— 自動流程不該推翻一個人的否決 —— 缺的是說明。現在 `stopped_because` 直接寫「這個 park 要人自己把 `job.json` 設回某個階段」。
+6. **兩個測試洞（mutation 抓到的，production code 沒有錯）。** (a) 把 runner 的 `BUDGET_EXCEEDED` 分支整段刪掉，31 個 runner 測試全綠 —— 因為 `resume_target` 自己的拒絕訊息裡也有「two hops」這個詞。斷言改成釘 runner 自己的開頭字串。(b) `renderer` 讀 `RENDER_ASSET_ID` 改成取**第一筆**而不是最後一筆，全套 1711 個測試全綠 —— 因為沒有任何測試在 `assets.jsonl` 裡放過兩筆。補了 `test_the_last_asset_record_wins_not_the_first`。
+
+**沒有修的一條審查意見，以及理由**：spec reviewer 回報 `test_the_technical_qa_report_...`（`KeyError: 'audio_sample_rate'`）與 `test_budget_exceeded_never_reaches_the_renderer`（60 輪不收斂）在 8 次全套裡紅了 3 次。**那不是 flaky，是兩份審查共用同一個 worktree。** mutation reviewer 當時正在跑的 mutation 6b/6c 就是「把 `fps` / `audio_sample_rate` 從 report 拿掉」、9a 就是「刪掉 `BUDGET_EXCEEDED` 分支」，safety reviewer 自己也記錄了 02:19 與 02:25 有人改寫了那四個檔案、02:27 還原。事後在乾淨的 worktree 單檔連跑兩次：`31 passed in 55.93s` / `31 passed in 55.89s`。**教訓：平行審查不要共用 worktree，否則彼此的 mutation 會變成對方的「flaky test」。**
+
+### 踩過的坑
+
+- **`store.render_output_path(job_id, "mp4")` 會拋。** 副檔名的點是必要的（`".mp4"`）。
+- **8 張一模一樣的 PNG 匯入不進去。** `import_assets` 會拒絕兩個 scene 的位元組雜湊相同（`these exact bytes are already recorded as ...`），整合測試因此每個 scene 用不同顏色。
+- **`scene_planner.MIN_SCENES` 是 8**，所以整合測試的假腳本至少要能切出 8 段 ≥6 字的單位（hook + 5 段 body + conclusion + cta）。這直接決定旁白長度，也就決定 CI 的 wall clock。
+- **一個字的 Edge TTS 探測會被 `voice_adapter` 正當地拒絕**：「測試」回來是 775 ms 時間軸配 1780 ms 音訊，超出容差。網路 gate 的探測句必須是完整句子，否則有能力跑的主機會被整檔 skip。
+- **`assets.jsonl` 沒有去重**，讀 AssetRecord 一律取最後一筆（既有的坑，runner 沒有繞過它，是 `renderer` 自己處理）。
+
 ## 5. §5.2 補邊：停駐的 job 現在回得來
 
 **這一節先前記的缺口已經補上。** §5.2 從 65 條邊補到 **76 條**，補的全是「停下來的 job 怎麼回到流程」，沒有新的生成路徑：
@@ -406,16 +524,20 @@ ffmpeg -hide_banner -nostdin -xerror -i FILE -f null -
 
 ## 6. 剩下的 issue
 
+**PLAN-001 的 11 張 issue 全數完成。** 剩下的都不是 PLAN-001 的列：
+
 | # | 標題 | 大小 | 卡在哪 |
 |---|---|---|---|
-| 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部；§5.2 的返回邊已補，剩 §5「還沒關的」那幾條。**唯一還沒做的一張** |
 | — | Phase 3 POC 操作 runbook（PLAN-001 Q6 提到的 S 號 docs issue） | S | 無阻塞，尚未建立 |
+| — | Scene fallback（FR-006 重試 1 次→image_motion） | — | **不可達**，隨 §6.6 video gate 開啟解除；見 §4.4 與 SPEC-001 §15 |
+| — | `video-provider-timeout` golden fixture | — | 同上：狀態機拒絕產生那條鏈 |
+| — | 把 `app/services/jobs/` 接進 API / WebUI | M | CLI 的 `run --job` 已接，SPEC §9 其餘 7 個入口仍沒有路由 |
 
 **階段之間的斷點目前都接上了**：`start_scripting()`（#4）→ `start_scene_planning()`（#5）→ `start_voice_generating()`（#6）。三個形狀一致：重讀 store、檢查前置文件存在、`transition` + `save` + `append_decision`。**`generate_master_voice()` 走到底會把 job 推進 `AWAITING_ASSETS`**，所以 #7 / #8 的入口狀態是那裡，不需要再補一條 stage 起手邊 —— `AWAITING_ASSETS → READY_TO_RENDER` 由 #8 擁有。
 
 **#8 已經照著 manifest 驗收，沒有另立一套檔名或路徑規則**（見 §4.2）；**#9 也沒有**（見 §4.3）。
 
-### #11 從 #9 拿到什麼
+### #11 從 #9 拿到什麼（已完成，保留為紀錄）
 
 - 一個停在 `TECHNICAL_QA` 的 job，`renders/final.mp4` 已經**驗過**：1080×1920、h264/aac、可完整解碼、時長對得上 manifest 時間軸、字幕沒有跑出片尾。加上一筆 `asset_id="asset-render-final"` 的 AssetRecord，`bytes` / `sha256` / `width` / `height` / `duration_ms` **全是量出來的**。
 - **入口只有兩個，而且 `render_job` 自己會過閘門**：`render_job(job, store)` 在 `READY_TO_RENDER` 時會先呼叫 `start_rendering`。#11 只要呼叫 `render_job`。
@@ -436,7 +558,7 @@ ffmpeg -hide_banner -nostdin -xerror -i FILE -f null -
 
 ## 7. 已知限制（審查有案，刻意未修）
 
-- **`app/services/jobs/` 在 production 端零呼叫者** —— 只有 pytest 進得去。SPEC §9 的 7 個入口（create / plan-assets / import-assets / render / qa / upload / postiz-draft / `run --job`）一個都沒接，`cli.py` 沒有任何 job 相關 subcommand。issue #4 範圍字面上寫了「CLI/API create」，但交付的只有 `pipeline.create_job()` 這個 Python 函式。
+- **`app/services/jobs/` 只有一個 production 入口。** issue #11 接上了 SPEC §9 的最後一列 `run --job`（`cli.py run --job <id>`）；其餘 **7** 個入口（create / plan-assets / import-assets / render / qa / upload / postiz-draft）仍然沒有 CLI subcommand，`app/controllers/v1` 也沒有 job route。建立 job 目前只有 `pipeline.create_job()` 這個 Python 函式。
 - **`create_job` 把 `creator_profile_id` 硬填空字串**（`pipeline.py:102`），而 SPEC §3.1 的輸入契約根本沒有這個欄位。#6 不受影響（合成 TTS 不引用真人聲音）。**#8 也沒有修它** —— `ContentJob` 是 `extra="forbid"`，要把 profile 掛回 job 本身得先改 §3.1 的請求契約，那是規格變更不是這條 slice。折衷做法：profile 在**匯入當下**傳進 `import_assets`，它的 id 寫在被它授權的那幾筆 AssetRecord 的 `license_or_consent`（`creator_profile:<id>`）上。**代價是真人素材的 job 必須第一次匯入就帶 profile**，事後補不了（見 §4.2）。
 - **真人 creator profile 這條路目前跑不到真的 pipeline 產物上。** `master_voice.py:453` 把唯一一筆 Master Voice AssetRecord 的 `consent_status` 寫死成 `not_applicable`，而 preflight 拒絕的正是這個值，所以拿一個真的 pipeline 產出的 job 去跑 `import_assets(..., creator_profile=p)` **必然 park**（實跑重現）。#8 的 profile 快樂路徑測試是手工建 voice record 的 —— 也就是說 SPEC §4.1:121 的「voice.asset_ref 指向唯一的 Master Voice」在有任何 stage 真的錄下一個真人聲音之前，**沒有端到端覆蓋**。這是誠實的缺口，不是被忘記的。
 - **§7 rule 12 在這條 slice 之外仍然漏。** `cli.py:704` 與 `task.py:1240` 兩個既有呼叫端**丟掉 `validate_creator_profile` 的回傳值、把原始路徑留在 params 上**，`webui/Main.py:4506` 還會把它 log 出來。三個檔案都在本次的禁改清單裡，只記錄不修。
@@ -467,7 +589,7 @@ ffmpeg -hide_banner -nostdin -xerror -i FILE -f null -
 - `budget.redact()` 只認得有標記或有固定前綴的憑證形狀，**裸 hex/UUID token 認不出來**。`postiz` 因此另外用自己知道的 token 值做明確比對（`_scrub`）。新增 provider adapter 時要沿用這個做法。
 - 去重是「先讀後寫」，兩個並行程序可各自通過檢查。V0 單程序檔案儲存，無此情境。
 - **SPEC §12 的 Contract 測試分類是零**，§6 的 Provider Protocol 一行都沒有，而且沒有任何 issue 擁有它。
-- **§12 要求 6 組 golden fixture，現存 3 組**：#8 補了 `missing-asset`（見 §4.2），仍缺 `video-provider-timeout`、`budget-exceeded`、`render-failure`。
+- **§12 要求 6 組 golden fixture，現存 5 組**：#8 補了 `missing-asset`（見 §4.2），#11 補了 `budget-exceeded` 與 `render-failure`（見 §4.4）。`video-provider-timeout` **刻意不建**，理由與量測見 §4.4 與 SPEC-001 §15。**沒有任何測試會自動發現新的 fixture 目錄** —— fixture 名稱的 parametrize 全是字面值，新 fixture 至少要手動加進 `test_job_store.py` 的憑證 grep 清單，否則它連掃都不會被掃。
 - **SPEC §13 Phase 0 的核准 gate 從未關閉**：PRD-001 仍標「Draft，等待使用者核准」、SPEC-001 仍標「Draft，等待 PRD-001 核准」、ADR-001 仍是 Proposed，但 6 張 issue 的 code 已經合併進 main。
 
 ## 8. 環境
@@ -500,3 +622,94 @@ ffmpeg -hide_banner -nostdin -xerror -i FILE -f null -
 
 7. **守衛的條件要對準它防的那件事，不要對準它最常見的那個情境。** #8 的 park 守衛寫的是「現在是不是 `AWAITING_ASSETS`」，因為 park 幾乎總是發生在那裡。結果是：重跑時被拒絕的素材，讓 job 停在敞開的 `READY_TO_RENDER` 閘門上 —— 例外有丟出來，狀態卻沒動。改成問轉移表（「§5.2 准不准從這裡 park」）就對了。**同型的教訓在 §5 已經有一條**：憑印象宣稱「§5.2 沒有從 SCENE_PLANNING 出去的失敗邊」，實測有四條。**要引用轉移表就去跑它。**
 
+
+
+## 10. V0 今天做得到什麼（收尾快照）
+
+一句話：**一台裝了 ffmpeg 的機器，只要有一組 LLM 憑證，就能把一個題目變成一支通過技術 QA 的 1080×1920 直式影片，並在人工放行後送出一份 Postiz 草稿 —— 中間任何一步崩掉都接得回去。**
+
+實跑走完的鏈（`test_job_runner.py::test_the_whole_arc_reaches_a_postiz_draft`，只 stub `app.services.llm.OpenAI` 與 Postiz 的 HTTP session，其餘全真）：
+
+~~~text
+create_job → SCRIPTING → generate_script → SCENE_PLANNING → plan_scenes(8 scenes)
+→ VOICE_GENERATING → generate_master_voice → AWAITING_ASSETS → generate_captions
+→ [人工把素材放進 generation manifest 指定的目錄] → import_assets → READY_TO_RENDER
+→ build_render_manifest → render_job → TECHNICAL_QA + qa/technical-qa.json
+→ [人工內容 QA 裁決] → CONTENT_QA → READY_FOR_REVIEW → POSTIZ_DRAFTING
+→ create_draft → POSTIZ_DRAFTED
+~~~
+
+**兩個 human-in-the-loop 的點是設計，不是缺口**：`AWAITING_ASSETS` 的素材匯入（§6.6 的 video gate 關著，V0 不呼叫任何 Image/Video Provider），以及 `CONTENT_QA` 的內容裁決（PRD-001 FR-008 的「人工否決能力」）。
+
+**V0 永遠不會發布。** `POSTIZ_DRAFTED` 是終點，`status=draft` / `auto_upload=false` 由 8 條測試釘住。
+
+唯一的 production 入口是 `cli.py run --job <id>`。**建立 job 還沒有入口**，只能呼叫 `pipeline.create_job()`。
+
+## 11. SPEC §12 全記分板（收尾）
+
+### Acceptance（6 條）
+
+| 條目 | 狀態 |
+|---|---|
+| Creator Profile 必須有明確同意，缺 consent／過期／撤回不得進 render | ⚠️ **實作了但端到端跑不到** —— `master_voice` 把 Master Voice 的 `consent_status` 寫死 `not_applicable`，preflight 拒絕的正是這個值（見 §7）|
+| Voice 只接受 improved TTS／錄音／人工匯入，且只有一個 Master Voice | ✅ |
+| Avatar 只接受人工匯入，禁 provider automation / cloning / lip-sync | ✅（`SUPPORTED_AUDIO_MODES` 只有 `master_voice`，gate 關著）|
+| `native_speech_avatar` 保留原生音訊 | ❌ **在 V0 被拒絕，不是被實作**（見 §7）|
+| 8～10 Scene、≤3 generated_video、1080×1920 H.264/AAC、post-render captions、Draft-only | ✅ |
+| log／audit／prompt 不得含 biometric、secret、credential | ✅（`budget.redact` + `postiz._scrub`，但 redact 認不出裸 hex token，見 §7）|
+
+### Unit（17 條）
+
+**全部有測試**，分佈在 `test_job_*.py` 十二個檔案裡。兩條要標註：
+
+- 「Provider Auth Policy 拒絕 `oauth_cli` 進入 `automated`」與「Video/Avatar Provider 未通過 contract 時拒絕 automation」都是**以「沒有這條路徑」的方式滿足的** —— V0 根本不呼叫 provider。gate 開啟時要重新驗收。
+- 「Idempotency 防止重複 Draft」現在有兩層：`RESUMABLE_STAGES` 排除 `POSTIZ_DRAFTING`，加上 runner 的 provider-event 守衛（§4.4）。**線路上仍然沒有 idempotency key。**
+
+### Contract（5 條）—— **零測試，零 owner**
+
+ImageProvider / VideoProvider / VoiceProvider / Renderer / Postiz Publisher。
+
+**這是整份 SPEC 唯一一個完全沒有動過的分類**，而且**沒有任何 issue 擁有它**。§6 的 Provider Protocol 一行 code 都沒有。現況是每個 adapter（`llm_adapter` / `voice_adapter` / `media_probe` / `render_adapter` / `postiz`）各自定義自己的邊界，形狀相似但**沒有共同介面，也沒有任何測試證明它們可互換**。
+
+不是漏掉：V0 只有一個 provider 實作，抽介面沒有第二個實作可以對照（見 §9 教訓 3 的同型陷阱）。**但下一個接手的人若要接第二個 provider，Contract 測試是第一件該做的事，不是最後一件。**
+
+### Integration（6 條）
+
+見 §4.4 的記分板：**5 / 6**。:641（Video Provider timeout 後 Scene fallback）不可達，解除條件是 §6.6 的 video gate。
+
+### Golden fixtures（6 組）—— 現存 5 組
+
+`three-scene-demo` / `ten-scene-demo` / `missing-asset` / `budget-exceeded` / `render-failure`。`video-provider-timeout` **刻意不建**（狀態機拒絕產生那條鏈，見 §4.4）。
+
+## 12. 刻意不做的事（全清單）
+
+| 不做什麼 | 為什麼 | 解除條件 |
+|---|---|---|
+| Scene fallback（FR-006 重試 1 次 → image_motion） | 三個前提全缺：沒有 provider 呼叫、狀態機沒有前向入邊、`image_motion` 不是合法 `VisualType` | §6.6 video gate 開啟 |
+| `video-provider-timeout` fixture | 它的 decisions 鏈會被狀態機自己拒絕（`IllegalTransitionError`） | 同上 |
+| `native_speech_avatar` | V0 只支援 `master_voice` 音訊模式 | 正式 Video/Avatar Provider contract |
+| 自動內容 QA | FR-008 的「人工否決能力」不可自動放行 | 產品決定；六項可機檢的部分見 §13 |
+| Postiz 的 config key／CLI 建草稿 | 不發明 config key、不讀憑證 | 決定 Postiz 憑證要走哪個 secret 通道 |
+| 改 `app/services/task.py` | 上游熱區，侵入式修改讓每次 merge upstream 都衝突（PLAN-001 Q2） | 不解除 |
+| Contract 測試 | 只有一個 provider 實作，抽介面沒有對照組 | 接第二個 provider 時 |
+
+## 13. 未決問題（活過了整份 PLAN-001）
+
+按「不解決會痛」排序：
+
+1. **`qa/technical-qa.json` 寫了，但沒有任何 production code 讀它。** `grep -rn read_technical_qa app cli.py webui` 只有測試。runner 在 `TECHNICAL_QA` 只看狀態不看報告。目前無害（`render_job` 會在 QA 失敗時直接拋，job 到不了 `TECHNICAL_QA`），但一份沒人讀的報告很快就會過期。
+2. **內容 QA 沒有任何 artifact。** PRD-001:187 說「至少檢查繁中／Hook／核心觀點／結論／CTA／來源標記與人工否決能力」—— 其中六項在 `Script` 上都有欄位（`hook` / `core_message` / `conclusion` / `cta` / `sources` / `risk_flags`），機械檢查得到。目前 runner 只消費一個 bool，寫一行決策。**「至少檢查」不等於「由人檢查」**，而 §4.3 為技術 QA 留下的那句警語（「現在不寫就永遠追不回來」）對這一半一樣成立。**這是對 Decision 5 形狀的質疑，不是缺陷回報 —— 留給人決定。**
+3. **整合測試的時長餘裕只有 45 ms。** `qa/technical-qa.json` 實測 `measured.duration_ms = 20930` vs `expected.duration_ms = 19975`，容差 1000 ms。measured 是渲染檔的長度（＝TTS 音訊長度），expected 是**最後一條字幕 cue 的結束時間**，兩者的差就是 Edge TTS 的尾端靜音。這個差是系統性的、不是隨機抖動 —— **三次獨立的完整跑（兩次審查 + 一次收尾驗證）量到的是同一組數字，逐毫秒相同**；但**離紅線只有 45 ms**。要嘛把 `DURATION_TOLERANCE_MS` 對齊「尾端靜音」這件事實，要嘛在整合測試裡把 TTS 換成固定長度的 take（代價是 §12:639 的覆蓋深度下降）。**兩個選項都會動到已經審過的決定，所以留給人。**
+4. **`test_job_runner.py` 在 import 時就會打一次網路。** `needs_the_full_stack` 是 module-scope 的 `skipif`，它會真的做一次 Edge TTS 合成 —— 這是 repo 裡第一個 collection 階段就連外的測試檔。後果是：**Edge TTS 連不上時，扛著 §12:639/:640/:643/:644 的 12 個測試靜默 skip，CI 照樣綠。** 建議是加一個 `MPT_TEST_REQUIRE_FULL_STACK=1` 之類的環境變數，在 ubuntu leg 上把 skip 變成 fail。
+5. **Windows leg 大概會「跑」而不是「skip」那 12 個測試。** `imageio-ffmpeg` 的 wheel 供應 decoder，所以 gate 會通過，windows-latest 會做一次真的 1080×1920 / 約 21 秒渲染。原本 4m55s 的 leg 會變多久，只有跑一次 CI 才知道。要嘛接受，要嘛在 gate 加 `sys.platform != "win32"`。
+6. **`create_job` 沒有 production 入口，`creator_profile_id` 硬填空字串。** 見 §7。
+7. **SPEC §13 Phase 0 的核准 gate 從未關閉。** PRD-001 與 SPEC-001 都還標著 Draft，ADR-001 還是 Proposed，但 11 張 issue 的 code 已經全部進 main。
+
+## 14. 接手路線圖：先讀哪幾份
+
+1. **本檔 §2「驗證現況」** —— 先跑一次測試，不要相信這份文件。
+2. **§3 與 §3.1**（`llm.generate_script` / `voice.tts` 兩個「失敗長得像成功」的上游）。整個 `*_adapter.py` 家族存在的理由都在這兩節，不讀就會想把它們刪掉。
+3. **§4.4「派工規則」那張表** —— runner 為什麼看 `job.json` 不看 `resume_target`。這是唯一一個看 code 看不出來、必須看量測的決定。
+4. **`app/services/jobs/runner.py` 的 module docstring** —— 階段順序、三條新邊、終止條件，全在那裡。
+5. **`docs/specs/SPEC-001-v0-local-pipeline.md` §5.2 轉移表與 §15 未決策清單** —— 要引用轉移表就去跑它（§9 教訓 7）。
+6. **§9 的九個教訓** —— 這批 code 每張 issue 都經過多輪 0 紅審查，那九條是審查沒抓到的。**下一輪審查大概率也抓不到同型的第十條。**

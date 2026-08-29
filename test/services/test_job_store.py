@@ -15,6 +15,7 @@ from app.models.content_job import (
     Script,
     UsageLedgerEntry,
 )
+from app.services.jobs.state_machine import is_legal
 from app.services.jobs.store import JobRecord, JobStore, JobStoreError
 from test.services.test_content_job_models import (
     asset_record_payload,
@@ -716,7 +717,17 @@ class TestFrozenFixtures:
         }
 
     @pytest.mark.parametrize(
-        "job_id", ("three-scene-demo", "ten-scene-demo", "missing-asset")
+        "job_id",
+        (
+            "three-scene-demo",
+            "ten-scene-demo",
+            "missing-asset",
+            # Issue #11's two. This tuple is hard-coded and nothing in the repo
+            # auto-discovers a fixture directory, so a new fixture that is not
+            # added here gets no credential grep at all.
+            "budget-exceeded",
+            "render-failure",
+        ),
     )
     def test_fixture_carries_no_credentials(self, job_id):
         job_dir = FIXTURES_ROOT / job_id
@@ -753,3 +764,66 @@ class TestFrozenFixtures:
 
         assert payload["content_job_id"] == "three-scene-demo"
         assert payload["status"] in {status.value for status in JobStatus}
+
+
+#: SPEC-001 §12's fixture list, minus the one that cannot exist — see
+#: :class:`TestParkedFixtures`. Shaped differently from
+#: :data:`EXPECTED_FIXTURES` on purpose: a parked job has no completed render
+#: manifest and its decision chain is longer than the five hops that pins.
+PARKED_FIXTURES = {
+    "budget-exceeded": {
+        "status": JobStatus.BUDGET_EXCEEDED,
+        "last_hop": ("READY_TO_RENDER", "BUDGET_EXCEEDED"),
+        "chain_length": 6,
+        "reason_contains": "budget",
+    },
+    "render-failure": {
+        "status": JobStatus.RETRYABLE_FAILED,
+        "last_hop": ("RENDERING", "RETRYABLE_FAILED"),
+        "chain_length": 7,
+        "reason_contains": "render failed",
+    },
+}
+
+
+class TestParkedFixtures:
+    """The two fixtures issue #11 added, both produced by running the real stages.
+
+    ``video-provider-timeout``, the third name SPEC-001 §12:651 lists, is
+    deliberately absent. ``SCENE_PLANNING -> VIDEO_GENERATING`` raises
+    ``IllegalTransitionError`` — the only in-edge to ``VIDEO_GENERATING`` is
+    from ``RETRYABLE_FAILED`` — so its ``decisions.jsonl`` would be a chain the
+    state machine itself refuses to emit. ``test_every_decision_is_a_legal_edge``
+    below is what a hand-written one would fail.
+    """
+
+    @pytest.mark.parametrize("job_id", tuple(PARKED_FIXTURES))
+    def test_fixture_loads_and_is_parked_where_it_says(self, job_id):
+        expected = PARKED_FIXTURES[job_id]
+        record = JobStore(FIXTURES_ROOT).load(job_id)
+
+        assert record.job.content_job_id == job_id
+        assert record.job.status is expected["status"]
+        assert record.script is not None
+        assert len(record.scenes) == 3
+        assert record.assets and record.usage_ledger
+
+    @pytest.mark.parametrize("job_id", tuple(PARKED_FIXTURES))
+    def test_the_decision_chain_reaches_the_park_it_is_named_for(self, job_id):
+        expected = PARKED_FIXTURES[job_id]
+        record = JobStore(FIXTURES_ROOT).load(job_id)
+        hops = [(decision["from"], decision["to"]) for decision in record.decisions]
+
+        assert len(hops) == expected["chain_length"]
+        assert hops[: len(EXPECTED_DECISION_CHAIN)] == list(EXPECTED_DECISION_CHAIN)
+        assert hops[-1] == expected["last_hop"]
+        assert hops[-1][1] == record.job.status.value
+        assert expected["reason_contains"] in record.decisions[-1]["reason"]
+
+    @pytest.mark.parametrize("job_id", tuple(PARKED_FIXTURES))
+    def test_every_decision_is_a_legal_edge(self, job_id):
+        """A fixture the state machine could never emit is not a fixture."""
+        record = JobStore(FIXTURES_ROOT).load(job_id)
+
+        for decision in record.decisions:
+            assert is_legal(decision["from"], decision["to"]), decision

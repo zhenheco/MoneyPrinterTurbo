@@ -33,7 +33,7 @@ half-written JSON document. The ``.jsonl`` files are append-only: neither
 ``save`` nor ``replace`` rewrites them.
 
 ``generation_manifest.json``, the ``scenes/<scene_id>/<kind>/`` directories and
-everything under ``audio/`` and ``renders/`` are stage-owned and deliberately
+everything under ``audio/``, ``renders/`` and ``qa/`` are stage-owned and deliberately
 *outside* the :class:`JobRecord` document set, so ``replace`` can never delete
 them — those directories hold files a human placed there by hand, or bytes that
 cost money or minutes of CPU to produce. Use
@@ -101,6 +101,12 @@ CAPTIONS_DOCUMENT_FILE = os.path.join(SUBTITLES_DIR, "captions.json")
 #: minutes of CPU to produce and must survive a ``replace``.
 RENDERS_DIR = "renders"
 FINAL_STEM = "final"
+#: Issue #11's technical QA report (SPEC-001 §12:644). Stage-owned and outside
+#: :class:`JobRecord` for the same reason ``renders/`` is: it is the only
+#: durable record of what the encoded file was measured to be, and a
+#: ``replace`` must never be able to delete it.
+QA_DIR = "qa"
+TECHNICAL_QA_FILE = os.path.join(QA_DIR, "technical-qa.json")
 #: A file extension, not a path segment: no separators, no dots beyond the one.
 _EXTENSION_PATTERN = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
 PROVIDER_EVENTS_FILE = "provider_events.jsonl"
@@ -532,6 +538,45 @@ class JobStore:
             raise JobStoreError(
                 f"{CAPTIONS_DOCUMENT_FILE} is not a JSON object: "
                 f"{type(payload).__name__}"
+            )
+        return payload
+
+    def technical_qa_path(self, job_id: str) -> Path:
+        """Where the §12:644 technical QA report lives. Creates nothing."""
+        job_dir = self._job_dir(job_id)
+        return self._within_root(job_dir / TECHNICAL_QA_FILE)
+
+    def write_technical_qa(self, job_id: str, report: Mapping[str, Any]) -> Path:
+        """Write ``qa/technical-qa.json`` atomically.
+
+        Same shape as :meth:`write_captions_document`, including the ownership
+        check: a report is only ever written for the job it names.
+
+        The report's ``measured`` block comes from **ffmpeg**, not ffprobe —
+        see :mod:`app.services.jobs.render_adapter` for why this repository has
+        no ffprobe. The filename says "technical qa", not "ffprobe", on purpose.
+        """
+        if not isinstance(report, Mapping):
+            raise JobStoreError("technical qa report must be a mapping")
+        if report.get("content_job_id") != job_id:
+            raise JobStoreError(
+                f"technical qa report belongs to {report.get('content_job_id')!r}, "
+                f"not to {job_id!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        path = job_dir / TECHNICAL_QA_FILE
+        self._write_guarded(path, json.dumps(dict(report), ensure_ascii=False, indent=2))
+        return path
+
+    def read_technical_qa(self, job_id: str) -> Optional[dict]:
+        """The parsed technical QA report, or ``None`` when none was written."""
+        path = self.technical_qa_path(job_id)
+        if not path.is_file():
+            return None
+        payload = _read_json(path, TECHNICAL_QA_FILE)
+        if not isinstance(payload, dict):
+            raise JobStoreError(
+                f"{TECHNICAL_QA_FILE} is not a JSON object: {type(payload).__name__}"
             )
         return payload
 

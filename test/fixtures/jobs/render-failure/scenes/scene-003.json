@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-003",
+  "content_job_id": "render-failure",
+  "scene_index": 3,
+  "semantic_purpose": "conclusion",
+  "narration": "從一個可量測的流程開始，再決定要不要買模型。",
+  "caption": "先量測，再決定",
+  "duration_target_ms": 22000,
+  "visual_type": "title_card",
+  "visual_prompt": "深色底白字標題卡，置中排版",
+  "reference_assets": [],
+  "generation_required": false,
+  "provider": "local_title_card",
+  "provider_model": "",
+  "fallback_type": "none",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}
