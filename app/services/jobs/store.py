@@ -14,6 +14,7 @@ truth (PLAN-001 Q1). Layout::
         audio/master-voice-timestamps.json
         subtitles/captions.srt           <- the subtitle track (SPEC-001 3.2)
         subtitles/captions.json
+        renders/final.mp4                <- the rendered video (issue #9)
         provider_events.jsonl
         usage_ledger.jsonl
         decisions.jsonl
@@ -32,11 +33,12 @@ half-written JSON document. The ``.jsonl`` files are append-only: neither
 ``save`` nor ``replace`` rewrites them.
 
 ``generation_manifest.json``, the ``scenes/<scene_id>/<kind>/`` directories and
-everything under ``audio/`` are stage-owned and deliberately *outside* the
-:class:`JobRecord` document set, so ``replace`` can never delete them — those
-directories hold files a human placed there by hand, or bytes that cost money
-to synthesise. Use :meth:`JobStore.write_generation_manifest`,
-:meth:`JobStore.scene_media_dir` and :meth:`JobStore.master_voice_path`.
+everything under ``audio/`` and ``renders/`` are stage-owned and deliberately
+*outside* the :class:`JobRecord` document set, so ``replace`` can never delete
+them — those directories hold files a human placed there by hand, or bytes that
+cost money or minutes of CPU to produce. Use
+:meth:`JobStore.write_generation_manifest`, :meth:`JobStore.scene_media_dir`,
+:meth:`JobStore.master_voice_path` and :meth:`JobStore.render_output_path`.
 
 Every path a read or write touches is resolved with ``os.path.realpath`` and
 proven to sit under the store root before it is opened, so a symlinked job
@@ -52,7 +54,7 @@ import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, List, Optional, Union
 
 from app.models.content_job import (
@@ -94,6 +96,11 @@ SUBTITLES_DIR = "subtitles"
 CAPTIONS_STEM = "captions"
 CAPTIONS_SRT_FILE = os.path.join(SUBTITLES_DIR, "captions.srt")
 CAPTIONS_DOCUMENT_FILE = os.path.join(SUBTITLES_DIR, "captions.json")
+#: Issue #9's rendered output. Stage-owned and deliberately outside
+#: :class:`JobRecord` for the same reason ``audio/`` is: these bytes cost
+#: minutes of CPU to produce and must survive a ``replace``.
+RENDERS_DIR = "renders"
+FINAL_STEM = "final"
 #: A file extension, not a path segment: no separators, no dots beyond the one.
 _EXTENSION_PATTERN = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
 PROVIDER_EVENTS_FILE = "provider_events.jsonl"
@@ -527,6 +534,70 @@ class JobStore:
                 f"{type(payload).__name__}"
             )
         return payload
+
+    def render_output_path(self, job_id: str, extension: str) -> Path:
+        """Create ``renders/`` idempotently and return the final video's path.
+
+        The file itself is not created — the renderer writes it. Same shape as
+        :meth:`master_voice_path`, including the post-mkdir re-check: a
+        symlinked ``renders`` would have been followed by ``parents=True`` and
+        is only visible afterwards.
+        """
+        if not isinstance(extension, str) or not _EXTENSION_PATTERN.fullmatch(extension):
+            raise JobStoreError(
+                f"render output extension must look like '.mp4': {extension!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        renders_dir = job_dir / RENDERS_DIR
+        self._within_root(renders_dir)
+        renders_dir.mkdir(parents=True, exist_ok=True)
+        self._within_root(renders_dir)
+        return self._within_root(renders_dir / f"{FINAL_STEM}{extension}")
+
+    def render_output_relative_path(self, extension: str) -> str:
+        """The value written to the rendered video's ``AssetRecord.storage_key``.
+
+        Job-dir-relative and POSIX-separated, validated identically to
+        :meth:`master_voice_relative_path` even though nothing is created here,
+        because this string is persisted.
+        """
+        if not isinstance(extension, str) or not _EXTENSION_PATTERN.fullmatch(extension):
+            raise JobStoreError(
+                f"render output extension must look like '.mp4': {extension!r}"
+            )
+        return f"{RENDERS_DIR}/{FINAL_STEM}{extension}"
+
+    def asset_path(self, job_id: str, storage_key: str) -> Path:
+        """Resolve a persisted ``AssetRecord.storage_key`` to a guarded path.
+
+        The renderer is the first stage that has to open files *other stages*
+        wrote, so it cannot use the per-stage helpers above: a scene's media
+        lives under ``scenes/<id>/images/``, the Master Voice under ``audio/``
+        and the subtitle track under ``subtitles/``, and the two frozen
+        fixtures use a third scheme again. This is the one place a
+        ``storage_key`` is turned into a path, and it stays data: the key is
+        parsed and refused if it is absolute, carries a ``..`` or a ``.``
+        segment, or uses a Windows separator, and the result still goes through
+        the same ``_within_root`` realpath proof every other helper uses, so a
+        symlinked subdirectory cannot be used to reach outside the root.
+
+        Creates nothing. A missing file is the caller's judgement to make.
+        """
+        if not isinstance(storage_key, str) or not storage_key.strip():
+            raise JobStoreError(f"storage_key must be a non-empty string: {storage_key!r}")
+        if "\\" in storage_key:
+            raise JobStoreError(
+                f"storage_key must be POSIX-separated: {storage_key!r}"
+            )
+        parts = PurePosixPath(storage_key).parts
+        if not parts or storage_key.startswith("/") or any(
+            part in ("..", ".") for part in parts
+        ):
+            raise JobStoreError(
+                f"storage_key must be a relative path inside the job: {storage_key!r}"
+            )
+        job_dir = self._job_dir(job_id)
+        return self._within_root(job_dir.joinpath(*parts))
 
     def write_generation_manifest(
         self, job_id: str, manifest: GenerationManifest

@@ -551,6 +551,8 @@ Render Manifest 必須是可重現資料，不依賴目前 WebUI 的暫存狀態
 
 禁止把繁體字幕、Logo、網址、CTA、QR Code、免責文字或關鍵數字預先烙印在生成圖片／影片中。
 
+上例的 `audio.sample_rate` 寫 48000 是來源取樣率，不是產出取樣率。實作實測（2026-08-30）：moviepy 的 `AudioFileClip` 會把任何來源 resample 到自身預設的 44100，`generate_video` 讀到的 `clip.fps` 因此恆為 44100，產出的 MP4 也一定是 44100。Render Manifest 必須宣告產出值，否則 technical QA 只會恆定失敗；builder 因此固定寫 44100，兩份 frozen fixture 內的 48000 只保留為歷史值。
+
 ## 9. CLI／入口映射
 
 在不改程式前，先把需求映射到現有入口：
@@ -707,5 +709,6 @@ V0 不把 Cloudflare 當作必要條件。若 V0 通過，V1 才評估 Workers�
 - 是否保留所有失敗生成素材與 storage retention。
 - 是否把現有 Upload-Post 流程標記為 deprecated，或只在 V0 adapter 層禁用。
 - 人工核可的 resume 是否重置該階段的重試計數，若重置由什麼 audit trail 記錄。
+- `native_speech_avatar` 是 per-Scene 還是 per-manifest；要表達 per-Scene 需要新增 `RenderSceneEntry.audio_mode` 並把 `RenderAudio.master_voice_asset_id` 改為 Optional。在此決策落地前，**V0 拒絕這個 mode**（`render_manifest.SUPPORTED_AUDIO_MODES` 只含 `master_voice`）：avatar Scene 的素材若帶原生音訊，builder 直接拒絕該 Job 並指名 Scene，而不是靜默用 Master Voice 覆蓋。因此 §12 的 `native_speech_avatar` 兩條（保留原生音訊、Native Speech Sync 驗證）在 V0 無對象可驗，屬 Phase 2。
 
 > 本 SPEC 完成後仍未進行功能程式修改；等待 PRD 與 SPEC 核准。
