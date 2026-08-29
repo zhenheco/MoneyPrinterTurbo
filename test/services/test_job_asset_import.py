@@ -19,6 +19,7 @@ it, which is itself asserted by ``test_a_decoderless_host_refuses...``.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -53,6 +54,14 @@ MOMENT = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
 requires_decoder = pytest.mark.skipif(
     not media_probe.decoder_available(),
     reason="no ffmpeg on this host, so no media can be produced or verified",
+)
+
+#: ``os.chmod`` on Windows toggles only the read-only flag, so mode 0 leaves a
+#: file perfectly readable and there is no portable way to make one unreadable.
+#: The rule under test is not platform-specific; the way to provoke it is.
+requires_posix_permissions = pytest.mark.skipif(
+    os.name == "nt",
+    reason="chmod(0) does not remove read access on Windows",
 )
 
 
@@ -808,6 +817,7 @@ def test_a_quicktime_container_is_not_recorded_as_mp4(tmp_path):
         assert media_probe.sniffed_mime(real) == media_probe.VIDEO_MP4
 
 
+@requires_posix_permissions
 def test_an_unreadable_file_keeps_its_path_out_of_the_audit_trail(tmp_path):
     """§7 rule 12. The OSError's ``str()`` carries the absolute path; the park
     reason is what lands in ``decisions.jsonl``, so it must not."""
