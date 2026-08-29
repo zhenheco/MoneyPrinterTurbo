@@ -823,6 +823,50 @@ def test_a_rerun_does_not_post_a_second_draft(at_technical_qa):
     assert "may already exist" in result.stopped_because
 
 
+def test_a_storeless_publisher_never_reaches_the_socket(at_technical_qa):
+    """A publisher persists only when a store was injected at construction, and
+    the caller builds it. Measured 2026-08-30 in the real local demo: with a
+    store-less publisher the POST went out, the job stayed at POSTIZ_DRAFTING
+    with zero postiz provider events, and the duplicate-draft guard therefore
+    saw nothing and would have posted a second time."""
+    store, job_id = at_technical_qa
+    session = Mock()
+    session.request.return_value = _Response()
+    storeless = PostizPublisher(
+        PostizSettings(
+            base_url="https://postiz.example.test/api",
+            api_token=POSTIZ_TOKEN,
+            platform="linkedin",
+        ),
+        session=session,
+    )
+
+    result = run_job(job_id, store, content_qa_approved=True, publisher=storeless)
+
+    assert session.request.call_count == 0
+    assert result.status is JobStatus.POSTIZ_DRAFTING
+    assert "not bound to this job store" in result.stopped_because
+    assert not [
+        event
+        for event in store.load(job_id).provider_events
+        if event.provider == "postiz"
+    ]
+
+
+def test_a_publisher_bound_to_another_store_never_reaches_the_socket(
+    at_technical_qa, tmp_path
+):
+    """Bound, but elsewhere: the draft would land in a different job tree — the
+    same unrecorded-call failure wearing a disguise."""
+    store, job_id = at_technical_qa
+    elsewhere, session = mock_publisher(JobStore(str(tmp_path / "other")))
+
+    result = run_job(job_id, store, content_qa_approved=True, publisher=elsewhere)
+
+    assert session.request.call_count == 0
+    assert "not bound to this job store" in result.stopped_because
+
+
 def test_an_empty_render_is_never_drafted(at_technical_qa):
     """Nothing between the render and the draft re-checks the file, and
     ``postiz`` only asks whether it exists. A truncated ``final.mp4`` reached
