@@ -313,6 +313,20 @@ def _step(record: JobRecord, store: JobStore, options: _Options) -> Optional[str
                 "supplied; PostizSettings has no config keys in V0, so the "
                 "caller constructs it"
             )
+        # A publisher persists the draft only when a store was injected at
+        # construction (postiz.PostizPublisher.__init__), and it is the caller
+        # who constructs it. Without one the POST still goes out and nothing is
+        # written: the job stays at POSTIZ_DRAFTING with no provider event, so
+        # the duplicate-draft guard below sees nothing next round and posts
+        # again. Refuse before the socket — an unrecorded irreversible call is
+        # the one failure this whole branch exists to prevent. Same store, too:
+        # one bound elsewhere would write the draft into another job tree.
+        if getattr(options.publisher, "_store", None) is not store:
+            return (
+                "the Postiz publisher is not bound to this job store, so a "
+                "draft it creates would not be recorded and the next run would "
+                "create a second one; construct it with store=<this store>"
+            )
         # ``state_machine.RESUMABLE_STAGES`` excludes POSTIZ_DRAFTING precisely
         # so a resume cannot create a second Draft; the runner reaches this
         # status by the front door instead, so it needs the same guard. Postiz
