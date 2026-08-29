@@ -231,6 +231,83 @@ def technical_qa(
     return TechnicalQaResult(facts=facts, failures=failures)
 
 
+def technical_qa_report(
+    job_id: str,
+    manifest: RenderManifest,
+    result: TechnicalQaResult,
+    checked_at: str,
+) -> dict:
+    """SPEC-001 §12:644's 「可讀的 technical QA report」, as a JSON document.
+
+    Says what was checked *and* what was found, not just pass/fail: every field
+    :class:`~app.services.jobs.render_adapter.StreamFacts` measured sits next to
+    the manifest value it was compared against, so a reader can tell a failure
+    apart from a wrong expectation without re-running anything.
+
+    ``pixel_format``, ``fps`` and ``audio_sample_rate`` are here for exactly
+    that reason — before this report they were measured and thrown away.
+
+    **The numbers come from ffmpeg, not ffprobe.** §12:644 names ffprobe;
+    :mod:`app.services.jobs.render_adapter` explains why this repository has
+    none, and why a full decode is the stricter check. The document says so in
+    ``measured_with`` so the report cannot imply a tool that never ran.
+    """
+    facts = result.facts
+    return {
+        "content_job_id": job_id,
+        "checked_at": checked_at,
+        "passed": result.passed,
+        "failures": list(result.failures),
+        "measured_with": "ffmpeg",
+        "measured_with_note": (
+            "SPEC-001 §12:644 says ffprobe; this host has none (see "
+            "app/services/jobs/render_adapter.py). These facts were read from a "
+            "full ffmpeg decode of the rendered file, which is stricter than a "
+            "container-header read."
+        ),
+        "measured": {
+            "duration_ms": facts.duration_ms,
+            "width": facts.width,
+            "height": facts.height,
+            "video_codec": facts.video_codec,
+            "pixel_format": facts.pixel_format,
+            "fps": facts.fps,
+            "audio_codec": facts.audio_codec,
+            "audio_sample_rate": facts.audio_sample_rate,
+        },
+        "expected": {
+            "duration_ms": render_manifest.timeline_end_ms(manifest),
+            "duration_tolerance_ms": DURATION_TOLERANCE_MS,
+            "width": manifest.canvas.width,
+            "height": manifest.canvas.height,
+            "video_codec": manifest.output.video_codec,
+            "pixel_format": manifest.canvas.pixel_format,
+            "fps": manifest.canvas.fps,
+            "audio_codec": manifest.audio.codec,
+            "audio_sample_rate": manifest.audio.sample_rate,
+            "container": manifest.output.container,
+        },
+    }
+
+
+def _write_qa_report(
+    store: JobStore,
+    job_id: str,
+    manifest: RenderManifest,
+    result: TechnicalQaResult,
+    checked_at: str,
+) -> TechnicalQaResult:
+    """Persist the report and hand the result straight back, pass or fail.
+
+    A failing render is exactly when the report is worth having, so it is
+    written before the caller decides what to do with ``result``.
+    """
+    store.write_technical_qa(
+        job_id, technical_qa_report(job_id, manifest, result, checked_at)
+    )
+    return result
+
+
 def _render_asset(
     job_id: str,
     store: JobStore,
@@ -377,7 +454,13 @@ def render_job(job: ContentJob, store: JobStore, *, now: str = "") -> ContentJob
             # since the render is re-rendered rather than shipped stale. Failing
             # here instead would be a loop: the retry would reuse the same file
             # and fail on the same check forever.
-            result = technical_qa(output_path, manifest, subtitle_text=subtitle_text)
+            result = _write_qa_report(
+                store,
+                job_id,
+                manifest,
+                technical_qa(output_path, manifest, subtitle_text=subtitle_text),
+                timestamp,
+            )
             reuse = result.passed
         if not reuse:
             render_adapter.render(
@@ -394,7 +477,13 @@ def render_job(job: ContentJob, store: JobStore, *, now: str = "") -> ContentJob
                 subtitle_path=subtitle_path,
                 output_path=output_path,
             )
-            result = technical_qa(output_path, manifest, subtitle_text=subtitle_text)
+            result = _write_qa_report(
+                store,
+                job_id,
+                manifest,
+                technical_qa(output_path, manifest, subtitle_text=subtitle_text),
+                timestamp,
+            )
             if not result.passed:
                 raise RenderError(
                     "technical QA refused the render: " + "; ".join(result.failures)

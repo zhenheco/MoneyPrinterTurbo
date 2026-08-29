@@ -824,3 +824,31 @@ def test_the_render_extension_is_validated(tmp_path):
             store.render_output_path(JOB_ID, extension)
         with pytest.raises(ValueError):
             store.render_output_relative_path(extension)
+
+
+@requires_decoder
+def test_the_last_asset_record_wins_not_the_first(tmp_path, monkeypatch):
+    """``assets.jsonl`` is an append-only log, so a re-render supersedes.
+
+    Measured 2026-08-30 by mutation: reading the *first* ``RENDER_ASSET_ID``
+    line instead of the last left the whole suite green, because no test until
+    this one put two of them in the file. A stale first record makes the sha
+    re-verify miss and the render is redone for nothing.
+    """
+    store, job = staged(tmp_path, slots=SHORT_SLOTS)
+    render_job(job, store, now=NOW)
+
+    rows = _assets(store)
+    others = [row for row in rows if row["asset_id"] != renderer.RENDER_ASSET_ID]
+    current = [row for row in rows if row["asset_id"] == renderer.RENDER_ASSET_ID][-1]
+    superseded = dict(current, sha256="0" * 64)
+    _write_assets(store, others + [superseded, current])
+    _patch_job(store, status="RENDERING")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the superseded record was read; the render was redone")
+
+    monkeypatch.setattr(render_adapter, "render", boom)
+
+    again = render_job(store.load(JOB_ID).job, store, now=NOW)
+    assert again.status is JobStatus.TECHNICAL_QA

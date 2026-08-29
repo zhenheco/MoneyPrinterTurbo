@@ -136,3 +136,4 @@ jobs:
           test/services/test_job_captions.py
           test/services/test_job_asset_import.py
           test/services/test_job_render.py
+          test/services/test_job_runner.py

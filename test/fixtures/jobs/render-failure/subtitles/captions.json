@@ -1,0 +1,36 @@
+{
+  "content_job_id": "render-failure",
+  "master_voice_asset_id": "asset-voice-001",
+  "subtitle_asset_id": "asset-subtitle-001",
+  "voice_total_duration_ms": 50000,
+  "voice_duration_source": "decoded",
+  "captions": [
+    {
+      "caption_ref": "caption-001",
+      "scene_id": "scene-001",
+      "scene_index": 1,
+      "srt_index": 1,
+      "start_ms": 0,
+      "end_ms": 6000,
+      "text": "九成企業導入 AI 的第一步就走錯了。"
+    },
+    {
+      "caption_ref": "caption-002",
+      "scene_id": "scene-002",
+      "scene_index": 2,
+      "srt_index": 2,
+      "start_ms": 6000,
+      "end_ms": 28000,
+      "text": "他們先買工具，再回頭找流程，結果沒有人知道要驗收什麼。"
+    },
+    {
+      "caption_ref": "caption-003",
+      "scene_id": "scene-003",
+      "scene_index": 3,
+      "srt_index": 3,
+      "start_ms": 28000,
+      "end_ms": 50000,
+      "text": "從一個可量測的流程開始，再決定要不要買模型。"
+    }
+  ]
+}

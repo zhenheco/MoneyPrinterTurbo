@@ -1,0 +1,18 @@
+{
+  "scene_id": "scene-002",
+  "content_job_id": "budget-exceeded",
+  "scene_index": 2,
+  "semantic_purpose": "body",
+  "narration": "他們先買工具，再回頭找流程，結果沒有人知道要驗收什麼。",
+  "caption": "先買工具，再找流程",
+  "duration_target_ms": 22000,
+  "visual_type": "generated_video",
+  "visual_prompt": "主管在會議室白板前比劃流程圖，鏡頭緩慢推近",
+  "reference_assets": [],
+  "generation_required": true,
+  "provider": "manual_google_flow",
+  "provider_model": "",
+  "fallback_type": "image_motion",
+  "attempt_count": 1,
+  "status": "READY_TO_RENDER"
+}

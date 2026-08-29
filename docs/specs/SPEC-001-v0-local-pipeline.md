@@ -709,6 +709,7 @@ V0 不把 Cloudflare 當作必要條件。若 V0 通過，V1 才評估 Workers�
 - 是否保留所有失敗生成素材與 storage retention。
 - 是否把現有 Upload-Post 流程標記為 deprecated，或只在 V0 adapter 層禁用。
 - 人工核可的 resume 是否重置該階段的重試計數，若重置由什麼 audit trail 記錄。
+- FR-006／§5.3 的「單一影片場景重試一次→降級為 image_motion」在 V0 **沒有可達的觸發點**，因此不實作、也不做休眠函式。三個前提全部不存在（2026-08-30 實測）：(a) V0 不呼叫任何 Image/Video Provider（§6.6 gate 關閉，全部人工匯入），所以沒有「生成失敗」這件事；(b) 狀態機沒有任何前向邊進入 `VIDEO_GENERATING`（唯一入邊來自 `RETRYABLE_FAILED`，`SCENE_PLANNING → VIDEO_GENERATING` 直接 `IllegalTransitionError`）；(c) `image_motion` 不是 `VisualType` 成員，這條規則唯一能表達的形式是 `visual_type=generated_image` + `motion=ken_burns`（對應 PRD FR-006 的「靜態圖片＋推鏡／平移／局部縮放」）。同理，§12 golden fixtures 的 `video-provider-timeout` 也**未建立**：它的 `decisions.jsonl` 會是狀態機本身拒絕產生的鏈。三者都隨 §6.6 gate 開啟而解除。
 - `native_speech_avatar` 是 per-Scene 還是 per-manifest；要表達 per-Scene 需要新增 `RenderSceneEntry.audio_mode` 並把 `RenderAudio.master_voice_asset_id` 改為 Optional。在此決策落地前，**V0 拒絕這個 mode**（`render_manifest.SUPPORTED_AUDIO_MODES` 只含 `master_voice`）：avatar Scene 的素材若帶原生音訊，builder 直接拒絕該 Job 並指名 Scene，而不是靜默用 Master Voice 覆蓋。因此 §12 的 `native_speech_avatar` 兩條（保留原生音訊、Native Speech Sync 驗證）在 V0 無對象可驗，屬 Phase 2。
 
 > 本 SPEC 完成後仍未進行功能程式修改；等待 PRD 與 SPEC 核准。
