@@ -1,0 +1,19 @@
+{
+  "content_job_id": "missing-asset",
+  "tenant_id": "zhenhe",
+  "brand_id": "zhenhe-ai",
+  "creator_profile_id": "",
+  "topic": "遠端團隊的三個溝通盲點",
+  "language": "zh-TW",
+  "target_duration_sec": 20,
+  "image_mode": "assisted_qwen",
+  "video_mode": "manual_google_flow",
+  "max_generated_video_scenes": 3,
+  "publish_mode": "postiz_draft",
+  "budget_limit_usd": 3.0,
+  "estimated_cost_usd": 0.12,
+  "actual_cost_usd": "unknown",
+  "status": "AWAITING_ASSETS",
+  "created_at": "2026-08-20T09:00:00+00:00",
+  "updated_at": "2026-08-20T09:20:00+00:00"
+}

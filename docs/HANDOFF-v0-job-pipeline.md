@@ -1,6 +1,6 @@
 # Handoff：V0 Job Pipeline
 
-> 最後更新 2026-08-28。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
+> 最後更新 2026-08-29。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
 
 ## 1. 現在在哪
 
@@ -16,9 +16,10 @@ V0 job pipeline 的相關合併：
 | #10 | `414c6fc` | CI：Windows smoke 納入 job pipeline 測試 |
 | #11 | `f407192` | issue #6：Master Voice + 時間軸 |
 | #12 | `35235c1` | issue #7：由時間軸產字幕 |
-| 本次 | — | SPEC-001 §5.2 補邊 65→76 + `resume_target` 返回目標推導（見 §5） |
+| #13 | — | SPEC-001 §5.2 補邊 65→76 + `resume_target` 返回目標推導（見 §5） |
+| 本次 | — | issue #8：Asset Import + Creator Profile preflight（見 §4.2） |
 
-PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
+PLAN-001 的 11 張 issue **做完 9 張**：#1 #2 #3 #4 #5 #6 #7 #8 #10。
 
 全部落在平行路徑 `app/services/jobs/`，**`app/services/task.py` 至今零修改**（上游熱區，侵入式修改會讓每次 merge upstream 都衝突 —— 見 PLAN-001 Q2）。
 
@@ -35,8 +36,10 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 | `app/services/jobs/master_voice.py` | issue #6：`start_voice_generating` / `generate_master_voice` + 時間軸文件 |
 | `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
 | `app/services/jobs/captions.py` | issue #7：由時間軸產 `subtitles/captions.srt` + `captions.json` |
+| `app/services/jobs/media_probe.py` | issue #8：一個磁碟上的檔案「實際是什麼」—— magic bytes、sha256、尺寸、時長、可否解碼。隔離 ffmpeg，形狀同 `voice_adapter`（**必讀 §4.2**） |
+| `app/services/jobs/asset_import.py` | issue #8：`import_assets` —— 對 manifest 驗收人工素材、寫 AssetRecord、creator profile preflight、`AWAITING_ASSETS → READY_TO_RENDER` |
 
-測試基準（2026-08-28 實測）：**1564 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
+測試基準（2026-08-29 實測）：**1618 passed / 11 skipped / 4172 subtests**，`ruff check` 全綠。
 
 
 ## 2. 驗證現況（接手第一件事）
@@ -45,13 +48,13 @@ PLAN-001 的 11 張 issue **做完 8 張**：#1 #2 #3 #4 #5 #6 #7 #10。
 cd ~/Documents/Claude\ Code\ Projects/MoneyPrinterTurbo
 git fetch origin main
 git log origin/main -1 --oneline
-.venv/bin/python -m pytest test -q                    # 1564 passed / 11 skipped / 4172 subtests
+.venv/bin/python -m pytest test -q                    # 1618 passed / 11 skipped / 4172 subtests
 .venv/bin/ruff check app cli.py main.py webui test    # All checks passed
 ```
 
 **注意本地 checkout 可能落後或分歧。** 這在這台開發機上已經發生過兩次：本地 `main` 落後 origin 好幾個 commit，且帶著一個從未推上去的舊 handoff commit（`b5a411a`）。先 `git status` 與 `git log origin/main..HEAD` 確認，再決定 pull 或 reset。
 
-CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13（含 redis service，跑全套）+ Windows smoke。Windows smoke 是**逐檔列舉**的，PR #10 之後納入了 7 個 job pipeline 測試檔（812 tests，實測全綠 —— 所以 `store.py` 沒有 POSIX-only 假設）。**新增 job pipeline 測試檔時要記得加進那份清單**，否則它不會在 Windows 上跑。需要 ffmpeg 的測試不要加（Windows runner 不保證有）。CI 仍然**沒有型別檢查**。
+CI 在 GitHub Actions（`ci.yml`）：Python 3.11 + 3.13（含 redis service，跑全套）+ Windows smoke。Windows smoke 是**逐檔列舉**的，PR #10 之後納入了 job pipeline 測試檔（本次 +`test_job_asset_import.py`，共 10 個）（812 tests，實測全綠 —— 所以 `store.py` 沒有 POSIX-only 假設）。**新增 job pipeline 測試檔時要記得加進那份清單**，否則它不會在 Windows 上跑。**「需要 ffmpeg 的測試不要加」這條已經作廢**：Windows runner 由 `imageio-ffmpeg` 的 win_amd64 wheel 供應 ffmpeg（`uv.lock:1211`），#8 的 53 個測試整檔在上面跑。但**沒有 `ffprobe`** —— 那個 wheel 只裝一個 binary，`app/` 裡也沒有 `get_ffprobe_binary`（見 §4.2）。CI 仍然**沒有型別檢查**。
 
 ## 3. ⚠️ 最重要的一課：`llm.generate_script` 會摧毀 JSON
 
@@ -217,6 +220,66 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 
 凍結 fixture：`test/fixtures/jobs/three-scene-demo/`、`ten-scene-demo/`。後續 slice 一律對這兩組驗收，**不要自建第二套測試資料**。但注意：**這兩組 fixture 沒有任何媒體 bytes**，`sha256` 是 `0001`~`0010` 的流水佔位值，issue #8 / #9 的驗收需要真實素材時要另外處理。另外，**這兩組 fixture 的 `scenes/` 是手寫的，不是 planner 產出的** —— 拿它們的 script 跑 `plan_scenes` 都會得到 8 個 scene，而 `ten-scene-demo` 的目錄裡是 10 個。不要把兩者當成同一回事。
 
+## 4.2 Asset Import（issue #8）
+
+```python
+job = import_assets(job, store)                      # 在 AWAITING_ASSETS 執行
+job = import_assets(job, store, creator_profile=p)   # ……素材裡有真人時
+```
+
+一次跑完 SPEC-001 §7 的 1–7、10–13 條，成功就把 job 推進 `READY_TO_RENDER`。**沒有 CLI**（`run --job` 是 #11）、**不過預算閘門**（跟 #5 / #7 一樣純本地、零 provider 呼叫；`check_budget` 在 `actual_cost_usd == "unknown"` 時一律拒絕，呼叫它反而會擋死一個免費操作）。
+
+### 四個決定，以及推翻不了它們的量測
+
+**1. 不呼叫 `video_material.save_video_material_upload`，儘管 PLAN row 8 寫「復用 `video_material.py`」。** 這是刻意偏離，不是漏做。2026-08-29 實測那個 helper：
+
+| 量測 | 結果 |
+|---|---|
+| JPEG bytes 命名成 `mislabeled.png` | **接受** —— 它只看副檔名，完全不嗅探 magic bytes |
+| mp4 bytes 命名成 `.png` | **接受**（ImageClip 回報 size `(320,240)`） |
+| 尺寸／時長限制 | `_validate_dimensions_and_timing` 只檢查 `> 0`。2x2 40ms mp4、7680x4320、8000x8000 png 全部接受 |
+| 回傳值 | **basename，不是路徑**；檔案寫進全域的 `<repo>/storage/local_videos/`，不是 job 目錄 |
+| sha256 | 模組裡一個都沒有。撞名時改成 `<stem>-<uuid12><suffix>`，同一份 bytes 上傳 N 次得到 N 個檔 |
+| 靜態圖片 | 也要 ffmpeg（`good.jpg` 在無 ffmpeg 環境 0.02 秒就丟 `VideoMaterialServiceError`） |
+
+§7 的第 2、3、4、5 條它一條都沒有實作，而人工素材**早就已經放在 manifest 的 `import_dir`**：把它繞經一個全域暫存目錄再搬回來，是兩次非原子搬移換零驗證收益。所以 #8 自己寫 probe。（那個模組**唯一值得學的一點**：它的錯誤是真的 `raise`，`VideoMaterialUploadError(ValueError)` / `VideoMaterialServiceError(RuntimeError)`，沒有重蹈 `llm.py` / `voice.py` 的哨兵回傳。）
+
+**2. `storage_key` 就是 manifest 的匯入路徑，檔案永遠不搬。** `storage_key = "<import_dir>/<expected_filename>"`，例如 `scenes/scene-001/images/scene-001.png`，相對 job 目錄、POSIX 分隔符 —— 也就是 manifest 當初叫操作者產出的那個位置。**兩份凍結 fixture 記的是 `assets/asset-NNN.png`，那是手寫佔位值、指向不存在的檔案，不是慣例**（跟 §7 已記的 voice asset 路徑分歧同一類問題）。沒有動它們：`test_job_master_voice.py:806` 與 `test_job_captions.py:629` 會把 `test/fixtures/jobs/` 底下每一個 byte 雜湊起來凍結。跟其他所有持久化的 `storage_key` 一樣，它是**資料**：路徑一律經 `store` 的 helper 還原，不要把那個字串接起來開檔。
+
+**3. preflight 只管真人素材。** PRD-001 FR-005 把 preflight 限縮在真人 voice/avatar；#6 合成的 TTS 記的是 `consent_status="not_applicable"` / `manual_review_status="not_required"`。要求每個 asset 都 `explicit_granted` 會把每一個 V0 job 都停在這道閘門。所以判準是：**`consent_status` 不是 `not_applicable`，或 creator profile 用 `asset_ref` 指名了它** —— 兩者皆非就原樣放行。
+
+**4. §7 rule 5 寫 ffprobe，這裡用 ffmpeg。** `ffprobe` 不存在於 Windows runner（見 §2），`app/` 裡沒有任何 `get_ffprobe_binary`。「ffprobe 可解碼」在這裡的操作型定義是：**ffmpeg 把整個檔案讀進 null muxer 並以 0 結束**。那比 ffprobe 嚴格，不是寬鬆 —— ffprobe 讀容器 header，這個解每一格。
+
+### 踩過的坑（每一條都是實跑重現的，不是讀碼推論）
+
+- **`-f null -` 單獨用會漏掉截斷檔，一定要配 `-xerror`。** 實測：一個 **faststart** mp4 砍到 60% bytes，ffmpeg 印出 `Invalid NAL unit size` 之後**以 0 結束**，只解出 100 格裡的 42 格，而 `Duration` 仍然讀 header 的完整 4000 ms —— job 就這樣進了 `READY_TO_RENDER`，AssetRecord 上寫著一個沒有 bytes 支撐的 `duration_ms=4000`。加上 `-xerror` 之後同一個檔 exit 183，乾淨的 mp4 與 png 仍然 exit 0。**非 faststart 的 mp4 會掩蓋這個 bug**（moov atom 在檔尾，截斷直接讓它整個讀不開），所以測試用的是 faststart。
+- **`ftyp` 不等於 mp4。** 每一種 ISOBMFF 都帶 `ftyp`，QuickTime `.mov`（brand `qt  `）曾經被原樣記成 `mime_type="video/mp4"`。現在連 major brand 一起比對（`MP4_BRANDS`）。
+- **匯入路徑上的 symlink 會被跟過去。** `store` 證明的是**目錄**在 root 底下，檔案本身是直接 `open` 的，而 `open` 跟 symlink。實測 bytes 來自 job 樹之外，`storage_key` 卻仍宣稱 manifest 的路徑。現在 `_entry_path` 直接拒收 symlink。
+- **OSError 的 `str()` 帶絕對路徑，而 park reason 會進 `decisions.jsonl`。** 那違反 §7 rule 12。訊息裡不插 `{error}`，路徑留在 chained exception 的 traceback 裡。
+- **manifest 若把同一個 scene 列兩次，會鑄出兩筆同 `asset_id` 的 record。** `asset_id` 是 `asset-<scene_id>` 推導出來的（見下），實測 job 帶著重複 record 進了 `READY_TO_RENDER`，之後每一次重跑都對著錯的那筆 record 做 checksum 比對而失敗，**永久卡死**，`_resolve_reference` 也再也解不開那個 scene。現在進迴圈前先擋。
+- **park 的守衛要問「§5.2 准不准 park」，不是「現在是不是 `AWAITING_ASSETS`」。** 實測：先不帶 profile 匯入 → avatar 被記成 `not_applicable` → 之後帶 profile 重跑 → `preflight` 丟 `UnauthorizedAssetError`，但 `_park` 因為狀態已經是 `READY_TO_RENDER` 而**提早 return**，job 就這樣帶著一個未授權的真人素材停在敞開的 render 閘門上，而 `resume_target` 還拒絕受理（「`READY_TO_RENDER` 不是停駐狀態」）。現在守衛改成 `MANUAL_ACTION_REQUIRED in TRANSITIONS[current.status]`。
+- **consent 是在 asset 被記錄的當下寫進去的，事後補不了 profile。** store 是 append-only，同一個 `asset_id` 再寫一筆會讓 `_resolve_reference` 因為「解到 2 筆」而爆掉。所以現在在「已匯入」分支就直接指名原因（「這個 asset 當初不是帶著這份 profile 匯入的」），而不是讓 preflight 去報一個看不出因果的症狀。**真人素材的 job，profile 必須第一次就帶。**
+- **`MAX_ASSET_BYTES` 在 `probe` 裡、緊跟著 `stat`**，不在 `asset_import` 裡。放在後面的話，一個 5 GB 的誤投要先被完整雜湊、再被完整解碼（最多 120 秒的 ffmpeg 牆）才會被告知太大。
+
+### 其他必須知道的
+
+- **`asset_id` 是推導的，不是隨機的**：`asset-<scene_id>`。兩個理由，都不是風格問題：store 完全沒有去重，重跑要靠它分辨「這筆已經匯入」與「這筆又寫了一份」；而 creator profile 的 `avatar.asset_ref` 必須能在**建立那個 asset 的匯入動作之前**就把它指名出來。隨機 uuid 會讓這兩件事都做不到。
+- **冪等，而且「已經有一些 asset」不等於「做完了」** —— #5 跟 #6 都踩過的同一個坑。重跑會補完還缺的，且不會為已匯入的 entry 追加第二筆（store 零去重，所以那是對 `store.load().assets` 的先讀後寫）。**推進 `READY_TO_RENDER` 的判斷看的是磁碟上的狀態**，所以崩在「最後一筆 asset 寫完、狀態還沒寫」之間的 job，重跑會把閘門補開。
+- **已匯入的 entry 每次重跑都會重驗 sha256。** 有 record 不代表檔案還在、還是同一份。
+- **缺件不是驗證失敗，是 缺件。** 檔案不存在**或是 0 byte** 都算，park 進 `MANUAL_ACTION_REQUIRED`，reason 只說「N 個 entry 還沒有可用的檔案：<scene ids>」—— **不寫 `original_filename`、不寫 narration**（§7 rule 12），也**不用 `budget.redact()`**（實測它會把識別碼整個吃掉：`"my secret plan.png"` → `"my <redacted>"`）。人補完檔案後走 `resume_target` 回到 `AWAITING_ASSETS` 再跑一次，實測整條路走得通。
+- **`normalized_profile` 在上游驗證器之上補了「必須有 expires_at」。** 實測 `creator_profile.validate_creator_profile`：把 `expires_at` 整個刪掉、或給 `""` / `None`，**都會通過**並存成 `""` —— 也就是一份永不過期的同意書。SPEC-001 §7 rule 11（`SPEC-001:506`）把有效期列為必要。`creator_profile.py` 跟舊 `task.py` 路徑共用，**沒有動它**，缺的那一半在 `asset_import` 這邊補。
+- **`UnauthorizedAssetError` 在此之前是「定義了但沒有任何地方 raise」**（`state_machine.py:182`）。§7 的 consent 閘門到 #8 才第一次有實作。
+- `app/services/jobs/` 現在**有 subprocess 了**（`media_probe.py` 呼叫 ffmpeg）。argv list、沒有 `shell=`，而且路徑不可能由攻擊者指定：`import_dir` 必須恰好是 `scenes/<scene_id>/<kind>` 並經 `store.scene_media_dir` 還原，`expected_filename` 必須是純檔名。§7 的 rule 8 / 9（不得把外部 URL 當 shell 指令、遠端下載要 allowlist/timeout/size cap）**仍然沒有主體** —— 這條 slice 什麼都不下載。
+
+### 新 fixture：`test/fixtures/jobs/missing-asset/`
+
+停在 `AWAITING_ASSETS`、帶自己的 `generation_manifest.json`（兩份既有 fixture 都沒有，而且**補不出來** —— 拿 three-scene-demo 的 script 重跑 `plan_scenes` 會得到 8 個 scene 不是 3 個），兩個 entry、零媒體 bytes。
+
+**刻意 metadata-only**：`test_job_store.py:718` 會把列名 fixture 底下每一個檔案當 UTF-8 文字讀來 grep 憑證字樣，真的 PNG 會丟 `UnicodeDecodeError`。需要媒體的測試自己 `copytree` 到 `tmp_path` 再寫入真實 PNG（Pillow）／MP4（`-loop 1 -i still.png`，刻意避開 `lavfi`，讓 fixture 少依賴一個 ffmpeg 子系統）。
+
+已加進 `test_job_store.test_fixture_carries_no_credentials`；**沒有**加進 `EXPECTED_FIXTURES`（那個斷言要求 render manifest 與完整 decision 鏈，這個 job 合理地兩者都沒有）。兩個 rglob 凍結測試會從第一次跑就自動把它凍住。
+
+
 ## 5. §5.2 補邊：停駐的 job 現在回得來
 
 **這一節先前記的缺口已經補上。** §5.2 從 65 條邊補到 **76 條**，補的全是「停下來的 job 怎麼回到流程」，沒有新的生成路徑：
@@ -263,14 +326,20 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 
 | # | 標題 | 大小 | 卡在哪 |
 |---|---|---|---|
-| 8 | Asset Import + Creator Profile preflight | L | **無阻塞**（#5 已完成；`AWAITING_ASSETS` 的人工停駐現在有返回邊，見 §5） |
-| 9 | Render Manifest + Renderer + ffprobe QA | L | 依賴 #6 #7 #8 |
+| 9 | Render Manifest + Renderer + ffprobe QA | L | **無阻塞**（#6 #7 #8 都已完成） |
 | 11 | `run --job` 端到端 + golden fixtures | M | 依賴全部；§5.2 的返回邊已補，剩 §5「還沒關的」那幾條 |
 | — | Phase 3 POC 操作 runbook（PLAN-001 Q6 提到的 S 號 docs issue） | S | 無阻塞，尚未建立 |
 
 **階段之間的斷點目前都接上了**：`start_scripting()`（#4）→ `start_scene_planning()`（#5）→ `start_voice_generating()`（#6）。三個形狀一致：重讀 store、檢查前置文件存在、`transition` + `save` + `append_decision`。**`generate_master_voice()` 走到底會把 job 推進 `AWAITING_ASSETS`**，所以 #7 / #8 的入口狀態是那裡，不需要再補一條 stage 起手邊 —— `AWAITING_ASSETS → READY_TO_RENDER` 由 #8 擁有。
 
-**#8 需要的東西 #5 已經備好**：每個 scene 的匯入目錄（`scenes/{scene_id}/images/` 或 `videos/`，SPEC §3.2 形狀）與 `generation_manifest.json` 的 `import_dir` / `expected_filename` / `accepted_mime_types`。#8 的驗證應該對照 manifest，不要另外定義一套檔名或路徑規則。
+**#8 已經照著 manifest 驗收，沒有另立一套檔名或路徑規則**（見 §4.2）。**#9 從 #8 拿到的東西**：
+
+- 一個停在 `READY_TO_RENDER` 的 job，`assets.jsonl` 裡每個 scene 各一筆 AssetRecord。
+- 那些 record 上的 `width` / `height` / `duration_ms` / `bytes` / `sha256` **全是實測值**，不是宣稱值 —— `media_probe` 解過每一格才寫下來。#9 的 QA 可以拿它們當基準比對渲染輸出，不必重新量素材。
+- `storage_key` 是 `scenes/<scene_id>/<kind>/<filename>`，相對 job 目錄。**要開檔一律經 `store.scene_media_dir(job_id, scene_id, kind)`**，不要把那個字串接起來 —— 那正是 `captions.py:419` 拒絕直接開持久化字串的理由。
+- **`asset_id` 是 `asset-<scene_id>`**，所以 render manifest 要把 scene 連回素材時不必查表。
+- `media_probe` 可以直接複用：`probe()` / `sniffed_mime()` / `decoder_available()` / `file_sha256()`。**#9 的驗收欄寫 ffprobe，而 ffprobe 在 Windows runner 上不存在**（見 §2 與 §4.2 決定 4）—— #9 要嘛沿用 `media_probe` 的 ffmpeg 全解碼，要嘛自己處理那個缺口，不要假設 `ffprobe` 叫得到。
+- #6 記在 `captions.json` 的 `voice_duration_source` 仍然要看：`"timeline"` 代表語音長度只是 provider 自報。**scene 素材的時長沒有這個問題**，#8 全部是實測的。
 
 **LLM API key 不再是阻塞。** DeepSeek 已接線並實測可用：`llm_provider = "deepseek"`、`deepseek_base_url = "https://api.deepseek.com"`、`deepseek_model_name = "deepseek-v4-pro"`，key 從 `op://Dev/DEEPSEEK_API/credential` 取出寫進 `config.toml`（該檔在 `.gitignore` 第 2 行）。
 
@@ -288,7 +357,10 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 ## 7. 已知限制（審查有案，刻意未修）
 
 - **`app/services/jobs/` 在 production 端零呼叫者** —— 只有 pytest 進得去。SPEC §9 的 7 個入口（create / plan-assets / import-assets / render / qa / upload / postiz-draft / `run --job`）一個都沒接，`cli.py` 沒有任何 job 相關 subcommand。issue #4 範圍字面上寫了「CLI/API create」，但交付的只有 `pipeline.create_job()` 這個 Python 函式。
-- **`create_job` 把 `creator_profile_id` 硬填空字串**，而 SPEC §3.1 的輸入契約根本沒有這個欄位。每個 V0 job 都無法連回 consent 記錄。**這條先前寫「擋到 #6」，實測不成立** —— #6 合成的是 TTS，不引用任何真人聲音，所以不需要 creator profile（見 §4 的 consent 欄位）。它仍然擋 #8 / #9 的**真人素材**路徑。
+- **`create_job` 把 `creator_profile_id` 硬填空字串**（`pipeline.py:102`），而 SPEC §3.1 的輸入契約根本沒有這個欄位。#6 不受影響（合成 TTS 不引用真人聲音）。**#8 也沒有修它** —— `ContentJob` 是 `extra="forbid"`，要把 profile 掛回 job 本身得先改 §3.1 的請求契約，那是規格變更不是這條 slice。折衷做法：profile 在**匯入當下**傳進 `import_assets`，它的 id 寫在被它授權的那幾筆 AssetRecord 的 `license_or_consent`（`creator_profile:<id>`）上。**代價是真人素材的 job 必須第一次匯入就帶 profile**，事後補不了（見 §4.2）。
+- **真人 creator profile 這條路目前跑不到真的 pipeline 產物上。** `master_voice.py:453` 把唯一一筆 Master Voice AssetRecord 的 `consent_status` 寫死成 `not_applicable`，而 preflight 拒絕的正是這個值，所以拿一個真的 pipeline 產出的 job 去跑 `import_assets(..., creator_profile=p)` **必然 park**（實跑重現）。#8 的 profile 快樂路徑測試是手工建 voice record 的 —— 也就是說 SPEC §4.1:121 的「voice.asset_ref 指向唯一的 Master Voice」在有任何 stage 真的錄下一個真人聲音之前，**沒有端到端覆蓋**。這是誠實的缺口，不是被忘記的。
+- **§7 rule 12 在這條 slice 之外仍然漏。** `cli.py:704` 與 `task.py:1240` 兩個既有呼叫端**丟掉 `validate_creator_profile` 的回傳值、把原始路徑留在 params 上**，`webui/Main.py:4506` 還會把它 log 出來。三個檔案都在本次的禁改清單裡，只記錄不修。
+- **`creator_profile._reject_sensitive_keys` 有量測到的缺口**（上游，未改）：它遞迴 Mapping 與 list 但**不走 tuple**；擋 13 個 key 名但 `file_path` / `api_key` / `password` / `private_key` **不在裡面**；而且它只看 key 不看 value（實測 `source="/Users/me/private/voice_biometric.wav"` 原樣通過並原樣回傳）；約 20000 層的深巢狀會漏出未捕捉的 `RecursionError` 而不是 `CreatorProfileError`。
 - **job 帶不了自己的語音設定。** SPEC §3.1 的請求契約沒有語音欄位，`ContentJob` 是 `extra="forbid"`，而 repo 裡唯一的 `voice_name` 設定住在 `[ui]`（WebUI 自己的偏好儲存）。#6 因此讀 `config.app["voice_name"]`、否則依 `job.language` 選一個。**同一台機器上跑兩個不同語言的 job 會共用同一個設定值**，這在接 CLI/API 層時要解決。
 - **音檔容器是寫死的 `.mp3` / `audio/mpeg`。** 預設 edge-tts 產出就是 MP3、逐位元組原樣寫入，所以目前正確；但 MiniMax 可設成回傳 WAV，`mimo` 又是唯一會照副檔名走的 provider。要正名就得嗅探容器，那屬於 #8（Asset Import）的驗證範圍。
 - **`Scene.caption` 沒有任何人讀。** `scene_planner` 為每個 scene 產了一個 ≤20 字的 `caption`（例如旁白「九成企業導入 AI 的第一步就走錯了。」對應 caption「九成企業第一步就走錯」），但 #7 的 SRT 寫的是 **`narration` 逐字** —— 字幕軌要跟語音說的一致，說一套寫一套是錯的。`caption` 看起來是為「燒進畫面的短標」設計的，那是另一個產物。**沒有規格條文決定這件事**（PRD FR-004 只說「旁白句子或單字時間軸」皆可），要改是產品決定，而且會改動 #7 的驗收測試。
@@ -310,7 +382,7 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 - `budget.redact()` 只認得有標記或有固定前綴的憑證形狀，**裸 hex/UUID token 認不出來**。`postiz` 因此另外用自己知道的 token 值做明確比對（`_scrub`）。新增 provider adapter 時要沿用這個做法。
 - 去重是「先讀後寫」，兩個並行程序可各自通過檢查。V0 單程序檔案儲存，無此情境。
 - **SPEC §12 的 Contract 測試分類是零**，§6 的 Provider Protocol 一行都沒有，而且沒有任何 issue 擁有它。
-- **§12 要求 6 組 golden fixture，只存在 2 組**：缺 `missing-asset`、`video-provider-timeout`、`budget-exceeded`、`render-failure`。
+- **§12 要求 6 組 golden fixture，現存 3 組**：#8 補了 `missing-asset`（見 §4.2），仍缺 `video-provider-timeout`、`budget-exceeded`、`render-failure`。
 - **SPEC §13 Phase 0 的核准 gate 從未關閉**：PRD-001 仍標「Draft，等待使用者核准」、SPEC-001 仍標「Draft，等待 PRD-001 核准」、ADR-001 仍是 Proposed，但 6 張 issue 的 code 已經合併進 main。
 
 ## 8. 環境
@@ -321,7 +393,7 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 - 測試中的憑證佔位值**不得含** `budget._CREDENTIAL_WORDS` 裡的字（`token`、`key`、`secret`、`bearer`、`cookie`、`session`），否則通用 pattern 會命中，測試在未修復的碼上也會通過。逼真的 base64/`sk-` 形狀會被 pre-commit 的 gitleaks 擋下 commit。
 - repo 與 CI **沒有 secret scan**；gitleaks 只是開發機的 global hook。
 
-## 9. 給下一個接手的人：四個教訓
+## 9. 給下一個接手的人：六個教訓
 
 這批程式碼每張 issue 都經過獨立 reviewer 多輪審查。以下是那些流程**沒抓到**、靠別的方式才發現的：
 
@@ -334,3 +406,8 @@ generate_captions(job, store)   # 在 AWAITING_ASSETS 內執行，不改狀態
 4. **合理的論證不等於正確的論證。** 修憑證外洩時採用了「統一讓所有欄位過 redact」這個聽起來更一致的做法，結果把合法 job id 的 idempotency key 吃掉、去重失效、重複計費。**聽起來合理的說法要實測，尤其是它推翻了某個 per-case 處理的時候。**
 
 5. **「冪等」的短路條件必須涵蓋每一次寫入，而且要判斷「完整」不是「存在」。** issue #5 的 `plan_scenes` 一開始用「已有 scenes 就直接回傳」當冪等，但它其實做多次獨立寫入（每個 scene 一個檔案 → 匯入目錄 → manifest）。崩在中途重跑會短路，manifest 永遠補不回來；更糟的是 `JobStore.replace` 崩在寫檔迴圈中間會留下 scene 前綴，那個前綴會被當成「已規劃」，產出少於 8 個 entry 的 manifest 並讓 job 永久卡住。兩個缺陷的測試都會全綠，因為沒有一條測試模擬過中途崩潰。**多步驟寫入的冪等要用「缺什麼補什麼」，短路條件要驗完整性（數量、連續性、歸屬），並且要有測試真的把中間產物刪掉再重跑。**（第二個缺陷是獨立 reviewer 抓到的，不是測試抓到的。）
+
+6. **「成功結束」跟「證明它成功了」是兩個不同的判斷，工具預設給你前者。** `ffmpeg -f null -` 把整個檔案讀過一遍還 exit 0 —— 讀起來完全像「這個檔沒問題」，實際意思是「我盡力了」。一個砍掉 40% 的 mp4 就這樣拿到了通行證，連帶把 header 宣稱的 4000 ms 寫進 AssetRecord。差別只在一個 `-xerror` flag。**任何拿子行程 exit code 當驗證結果的地方，都要先實跑一個你知道是壞的輸入，確認它真的紅。** 這跟 §3 那兩課同源：`llm.generate_script` 回傳 `"Error: ..."`、`voice.tts` 回傳 `None`、`ffmpeg` 回傳 0 —— **三個不同的上游，三種「失敗長得像成功」**。
+
+7. **守衛的條件要對準它防的那件事，不要對準它最常見的那個情境。** #8 的 park 守衛寫的是「現在是不是 `AWAITING_ASSETS`」，因為 park 幾乎總是發生在那裡。結果是：重跑時被拒絕的素材，讓 job 停在敞開的 `READY_TO_RENDER` 閘門上 —— 例外有丟出來，狀態卻沒動。改成問轉移表（「§5.2 准不准從這裡 park」）就對了。**同型的教訓在 §5 已經有一條**：憑印象宣稱「§5.2 沒有從 SCENE_PLANNING 出去的失敗邊」，實測有四條。**要引用轉移表就去跑它。**
+
