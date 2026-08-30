@@ -1,6 +1,6 @@
 # ADR-001：Provider 授權與執行模式邊界
 
-> 狀態：Proposed
+> 狀態：Accepted（2026-08-30 隨 PRD-001／SPEC-001 核准）
 > 日期：2026-08-16
 > 範圍：Zhenhe AI V0、MoneyPrinterTurbo fork
 

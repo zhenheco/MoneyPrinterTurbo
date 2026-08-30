@@ -488,8 +488,8 @@ Output and exit status:
         description=(
             "Drive one job from its persisted status as far as it can go. "
             "Content QA is a human gate: without a verdict the run stops at "
-            "TECHNICAL_QA. Postiz drafting needs a publisher, which this CLI "
-            "does not construct — V0 has no Postiz config keys."
+            "TECHNICAL_QA. Postiz drafting needs the [postiz] section in "
+            "config.toml; leave it empty and the run stops at POSTIZ_DRAFTING."
         ),
         formatter_class=_CliHelpFormatter,
     )
@@ -868,6 +868,11 @@ def run_job_command(args: argparse.Namespace) -> int:
     states for ``build_video_params``: importing ``app.services.jobs`` writes a
     ``config.toml`` and creates ``storage/``, and ``cli.py --help`` must not.
     """
+    from app.services.jobs.postiz import (
+        PostizConfigurationError,
+        PostizPublisher,
+        settings_from_config,
+    )
     from app.services.jobs.runner import RunnerError, run_job
     from app.services.jobs.store import JobStore, JobStoreError
     from app.utils import utils
@@ -875,12 +880,27 @@ def run_job_command(args: argparse.Namespace) -> int:
     root = args.store or utils.storage_dir("jobs", create=True)
     try:
         store = JobStore(root)
+        # No [postiz] section is a supported state: pass no publisher and let
+        # the runner's own message explain why the job stopped at
+        # POSTIZ_DRAFTING. When there is one, bind this store — a publisher
+        # bound elsewhere would POST without recording, and the runner refuses
+        # it before the socket.
+        settings = settings_from_config()
+        publisher = (
+            None if settings is None else PostizPublisher(settings, store=store)
+        )
         result = run_job(
             args.job,
             store,
             content_qa_approved=args.content_qa_approved,
             resume=args.resume,
+            publisher=publisher,
         )
+    except PostizConfigurationError as exc:
+        # A misconfigured section is bad input, not a traceback. The message
+        # names the field; it never carries the value.
+        logger.error(f"cannot run job {args.job}: invalid [postiz] config: {exc}")
+        return 2
     except (JobStoreError, OSError) as exc:
         # Bad input or an unusable store: the epilog's exit 2.
         logger.error(f"cannot run job {args.job}: {exc}")

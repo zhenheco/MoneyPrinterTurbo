@@ -577,6 +577,9 @@ def test_without_a_publisher_the_runner_stops_rather_than_inventing_settings(
 
     assert result.status is JobStatus.POSTIZ_DRAFTING
     assert "no publisher was supplied" in result.stopped_because
+    # The message must point at the config surface a shell user can actually
+    # fill in, not at "a Python caller constructs it".
+    assert "[postiz]" in result.stopped_because
 
 
 # -- the caption rule -------------------------------------------------------

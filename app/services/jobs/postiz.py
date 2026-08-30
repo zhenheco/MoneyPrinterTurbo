@@ -176,6 +176,53 @@ class PostizSettings:
             )
 
 
+def settings_from_config(
+    section: Optional[Mapping[str, Any]] = None,
+) -> Optional[PostizSettings]:
+    """Build validated settings from the ``[postiz]`` config section.
+
+    Returns ``None`` when the section is absent or entirely unset: "no Postiz
+    configured" is a normal V0 state, and the caller then simply does not
+    draft. A section that names *something* but is wrong is a different thing
+    and raises :class:`PostizConfigurationError` naming the offending field —
+    never its value, so the token cannot reach a message or a log line.
+    """
+    if section is None:
+        from app.config import config as _config
+
+        section = getattr(_config, "postiz", None) or {}
+
+    def _text(key: str) -> str:
+        return str(section.get(key, "") or "").strip()
+
+    base_url = _text("base_url")
+    api_token = _text("api_token")
+    platform = _text("platform")
+    if not (base_url or api_token or platform):
+        return None
+
+    # A TOML value can arrive as a string; coerce here and let validate() judge
+    # the number itself (only its type is this function's business).
+    raw_timeout = section.get(
+        "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS
+    )
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        raise PostizConfigurationError(
+            "postiz request_timeout_seconds must be a number"
+        ) from None
+
+    settings = PostizSettings(
+        base_url=base_url,
+        api_token=api_token,
+        platform=platform,
+        request_timeout_seconds=timeout,
+    )
+    settings.validate()
+    return settings
+
+
 class PostizPublisher:
     """Create Postiz drafts for a job. Draft-only, enforced locally."""
 

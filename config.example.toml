@@ -369,6 +369,23 @@ model_id = "chatterbox"
 voices = ["default-Female"]
 
 # =============================================================================
+# Publishing / 发布
+# =============================================================================
+
+[postiz]
+# Postiz draft credentials. V0 only ever creates drafts and never publishes:
+# publish_now, auto_upload=true and any public status are refused locally
+# before the request goes out.
+# API token: your Postiz instance's Settings -> Public API.
+# Leaving this section empty is a supported state — a job then simply stops at
+# POSTIZ_DRAFTING and no draft is created.
+base_url = ""
+api_token = ""
+# The Postiz channel/platform the draft is created for, e.g. "linkedin".
+platform = ""
+request_timeout_seconds = 30
+
+# =============================================================================
 # WebUI Preferences / WebUI 偏好
 # =============================================================================
 

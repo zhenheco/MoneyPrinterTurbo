@@ -1,6 +1,6 @@
 # Handoff：V0 Job Pipeline
 
-> 最後更新 2026-08-30（issue #11 收尾）。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
+> 最後更新 2026-08-30（issue #11 收尾 + Postiz config 收口 / Phase 0 核准）。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
 
 ## 1. 現在在哪
 
@@ -19,9 +19,12 @@ V0 job pipeline 的相關合併：
 | #13 | — | SPEC-001 §5.2 補邊 65→76 + `resume_target` 返回目標推導（見 §5） |
 | #14 | — | issue #8：Asset Import + Creator Profile preflight（見 §4.2） |
 | #15 | `41beee3` | issue #9：Render Manifest + Renderer + technical QA（見 §4.3） |
-| 本次 | — | issue #11：`run --job` 端到端 orchestrator + 兩份 golden fixture + technical QA report（見 §4.4） |
+| #16 | — | issue #11：`run --job` 端到端 orchestrator + 兩份 golden fixture + technical QA report（見 §4.4） |
+| 本次 | — | `[postiz]` config 區段 + `settings_from_config()` + CLI 接線；Phase 0 核准閘門關閉（見 §4.5） |
 
 PLAN-001 的 11 張 issue **全部完成**：#1 #2 #3 #4 #5 #6 #7 #8 #9 #10 #11。
+
+Phase 0 核准閘門已於 2026-08-30 關閉：PRD-001 / SPEC-001 標記 `Approved`、ADR-001 標記 `Accepted`。三份文件裡「核准前不得修改既有業務程式」的約束**沒有被刪除**，只加註為「核准前成立」—— 實作期間確實零改動（`git log 407d78d..HEAD -- app/services/{task,llm,voice,subtitle,video}.py` 為空）。
 
 全部落在平行路徑 `app/services/jobs/`，**`app/services/task.py` 至今零修改**（上游熱區，侵入式修改會讓每次 merge upstream 都衝突 —— 見 PLAN-001 Q2）。
 
@@ -402,7 +405,18 @@ FR-008 的內容 QA 那一半（繁中／Hook／核心觀點／結論／CTA／�
 - `content_qa_approved=True` → 走完三條邊。
 - `content_qa_approved=False` → 記一行 `CONTENT_QA → MANUAL_ACTION_REQUIRED`（reason 含「人工否決」）並停下。**這個 park 沒有自動出路**：`CONTENT_QA` 不在 `MANUAL_RETURN_STAGES` 裡，所以是留給人的。
 - caption **不會被憑空發明**：規則是 `script.hook` + 空行 + `script.cta`（`Script` 沒有 caption 欄位，這兩個是實際存在的），呼叫端可用 `caption=` 覆寫。
-- `PostizSettings` 仍然沒有 config key，runner **不讀任何憑證**：publisher 由呼叫端建構，沒給就停在 `POSTIZ_DRAFTING` 並說明原因。
+- runner **不讀任何憑證**：publisher 由呼叫端建構，沒給就停在 `POSTIZ_DRAFTING` 並說明原因（訊息現在指向 `config.toml` 的 `[postiz]` 區段）。憑證是 `postiz.settings_from_config()` 讀的，不是 runner。
+
+### 4.5 Postiz config 收口（本次）
+
+在此之前 `cli.py run --job` 永遠到不了草稿：`PostizSettings` 沒有任何 config key，只有 Python 呼叫端能建 publisher。現在：
+
+- `config.example.toml` 有 `[postiz]` 區段：`base_url` / `api_token` / `platform` / `request_timeout_seconds`，前三個**出貨為空字串**，timeout 為 `30`（= `DEFAULT_REQUEST_TIMEOUT_SECONDS`）。`app/config/config.py` 加上對應的 module attribute。
+- `postiz.settings_from_config()`：整段未設定 → 回 `None`（「沒設定」是 V0 的正常狀態，不是錯誤，job 就停在 `POSTIZ_DRAFTING`）；半填或填錯 → 拋 `PostizConfigurationError` 並**只講欄位名，不講值**。timeout 會先做防禦性轉型（TOML 可能給字串）再交給 `validate()` 判定。
+- `cli.py run --job` 有設定就建 publisher，**一律帶 `store=store`**（PR #17：store 不同的 publisher 會照樣送出 POST 卻不寫事件，重複草稿守衛因此看不到事件而再送一次）。設定錯誤走既有的輸入錯誤分支 → **exit 2**，不是 traceback。
+- 所有 `app.services.jobs` import 仍留在 handler 內部，`cli.py --help` 與 `cli.py run --help` 實測都不建 `config.toml`。
+
+憑證外洩面實測過：canary token 走完整條 CLI → 真 TLS server 路徑，stdout／stderr／job store（含 `decisions.jsonl`、`provider_events.jsonl`）／worktree／`storage/` 全部 0 命中；伺服器把 token 回吐成 error body 或 `draft_id` 時也只落 `<redacted>`。`PostizSettings.api_token` 維持 `field(repr=False)`。
 
 ### `qa/technical-qa.json`
 
@@ -456,7 +470,7 @@ SPEC §9 的最後一列。`parser.add_subparsers(dest="command")`**不帶** `re
 
 - exit code 沿用既有約定：0 成功、1 job 需要人／失敗、2 參數或輸入錯誤。stdout 恰好一個 JSON 物件（`ensure_ascii=False`），loguru 只走 stderr。**「失敗」不等於「停駐」** —— 見下一節第 1 條。
 - **所有 `app.services.jobs` import 都在 handler 內部** —— import 那些模組會寫出一個 gitignored 的 `config.toml` 並建立 `storage/`，`cli.py --help` 不可以開始建檔（實測：import `cli.py` 不建檔，import 任一 jobs 模組會建）。
-- `--content-qa-approved` / `--no-content-qa-approved`（`BooleanOptionalAction`，預設 `None` = 沒人看過）。**CLI 建不了 Postiz draft**：V0 沒有 Postiz config key，所以 CLI 跑到 `POSTIZ_DRAFTING` 就停並說明原因。這是誠實的，不是缺陷。
+- `--content-qa-approved` / `--no-content-qa-approved`（`BooleanOptionalAction`，預設 `None` = 沒人看過）。**填了 `[postiz]` 就能一路建到草稿**，沒填就停在 `POSTIZ_DRAFTING` 並說明原因（見 §4.5）。
 - 測試是直接呼叫 parser 與 handler，不 shell out。
 
 ### 三個攻擊視角修掉的六件事（mutation / safety / spec）
@@ -689,7 +703,6 @@ ImageProvider / VideoProvider / VoiceProvider / Renderer / Postiz Publisher。
 | `video-provider-timeout` fixture | 它的 decisions 鏈會被狀態機自己拒絕（`IllegalTransitionError`） | 同上 |
 | `native_speech_avatar` | V0 只支援 `master_voice` 音訊模式 | 正式 Video/Avatar Provider contract |
 | 自動內容 QA | FR-008 的「人工否決能力」不可自動放行 | 產品決定；六項可機檢的部分見 §13 |
-| Postiz 的 config key／CLI 建草稿 | 不發明 config key、不讀憑證 | 決定 Postiz 憑證要走哪個 secret 通道 |
 | 改 `app/services/task.py` | 上游熱區，侵入式修改讓每次 merge upstream 都衝突（PLAN-001 Q2） | 不解除 |
 | Contract 測試 | 只有一個 provider 實作，抽介面沒有對照組 | 接第二個 provider 時 |
 

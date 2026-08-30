@@ -521,6 +521,7 @@ siliconflow = _SynchronizedConfig(_cfg.get("siliconflow", {}))
 minimax_tts = _SynchronizedConfig(_cfg.get("minimax_tts", {}))
 elevenlabs = _SynchronizedConfig(_cfg.get("elevenlabs", {}))
 chatterbox = _SynchronizedConfig(_cfg.get("chatterbox", {}))
+postiz = _SynchronizedConfig(_cfg.get("postiz", {}))
 ui = _SynchronizedConfig(
     _cfg.get(
         "ui",
