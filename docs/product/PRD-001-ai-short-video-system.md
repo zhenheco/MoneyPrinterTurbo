@@ -1,6 +1,6 @@
 # PRD-001：Zhenhe AI 短影音經營系統
 
-> 文件狀態：Draft，等待使用者核准
+> 文件狀態：Approved，使用者於 2026-08-30 核准 V0 範圍
 > 文件版本：0.2
 > 目標 Repo：zhenheco/MoneyPrinterTurbo
 > 上游 Repo：harry0703/MoneyPrinterTurbo
@@ -10,7 +10,7 @@
 
 ## 0. 文件定位
 
-本文件把既有 AI 短影音需求落地到 MoneyPrinterTurbo fork 的產品範圍與驗收標準。它是規劃文件，不代表功能已經實作，也不授權在核准前修改既有功能程式或部署正式資源。
+本文件把既有 AI 短影音需求落地到 MoneyPrinterTurbo fork 的產品範圍與驗收標準。2026-08-30 核准後，V0 的 Job pipeline（資料契約、狀態機、預算閘門、素材匯入、Master Voice、字幕、Render manifest、Postiz draft adapter、CLI runner）已依 PLAN-001 實作完成；核准前的「不得修改既有功能程式」約束在實作期間成立：PLAN-001 的十一個 slice 對 `app/services/task.py`、`llm.py`、`voice.py`、`subtitle.py`、`video.py` 皆為零改動（`git log 407d78d..HEAD` 對這五個檔案 0 commit；核准前對 task.py 的唯一改動是 2026-08-26 的 LoomLoom 整合 3aad26c）。部署正式資源仍不在本文件授權範圍內。
 
 第一階段原則：
 

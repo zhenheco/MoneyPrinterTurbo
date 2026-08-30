@@ -1,6 +1,6 @@
 # SPEC-001：MoneyPrinterTurbo V0 本機 Vertical Slice
 
-> 文件狀態：Draft，等待 PRD-001 核准
+> 文件狀態：Approved，隨 PRD-001 於 2026-08-30 一併核准
 > 文件版本：0.2
 > 目標 Repo：zhenheco/MoneyPrinterTurbo
 > 目標分支：main
@@ -8,7 +8,7 @@
 
 ## 1. 範圍與不變條件
 
-本 SPEC 定義如何把 Zhenhe AI 的 AI 短影音需求映射到 MoneyPrinterTurbo 現有的 Python／WebUI／API／CLI／MoviePy／FFmpeg 基線。此階段只定義契約、資料、狀態、驗收與實作順序；PRD 未核准前不得建立正式功能或修改既有業務程式。
+本 SPEC 定義如何把 Zhenhe AI 的 AI 短影音需求映射到 MoneyPrinterTurbo 現有的 Python／WebUI／API／CLI／MoviePy／FFmpeg 基線。此階段只定義契約、資料、狀態、驗收與實作順序；PRD 未核准前不得建立正式功能或修改既有業務程式（此約束於 2026-08-30 核准前成立）。
 
 V0 執行邊界：
 
@@ -712,4 +712,4 @@ V0 不把 Cloudflare 當作必要條件。若 V0 通過，V1 才評估 Workers�
 - FR-006／§5.3 的「單一影片場景重試一次→降級為 image_motion」在 V0 **沒有可達的觸發點**，因此不實作、也不做休眠函式。三個前提全部不存在（2026-08-30 實測）：(a) V0 不呼叫任何 Image/Video Provider（§6.6 gate 關閉，全部人工匯入），所以沒有「生成失敗」這件事；(b) 狀態機沒有任何前向邊進入 `VIDEO_GENERATING`（唯一入邊來自 `RETRYABLE_FAILED`，`SCENE_PLANNING → VIDEO_GENERATING` 直接 `IllegalTransitionError`）；(c) `image_motion` 不是 `VisualType` 成員，這條規則唯一能表達的形式是 `visual_type=generated_image` + `motion=ken_burns`（對應 PRD FR-006 的「靜態圖片＋推鏡／平移／局部縮放」）。同理，§12 golden fixtures 的 `video-provider-timeout` 也**未建立**：它的 `decisions.jsonl` 會是狀態機本身拒絕產生的鏈。三者都隨 §6.6 gate 開啟而解除。
 - `native_speech_avatar` 是 per-Scene 還是 per-manifest；要表達 per-Scene 需要新增 `RenderSceneEntry.audio_mode` 並把 `RenderAudio.master_voice_asset_id` 改為 Optional。在此決策落地前，**V0 拒絕這個 mode**（`render_manifest.SUPPORTED_AUDIO_MODES` 只含 `master_voice`）：avatar Scene 的素材若帶原生音訊，builder 直接拒絕該 Job 並指名 Scene，而不是靜默用 Master Voice 覆蓋。因此 §12 的 `native_speech_avatar` 兩條（保留原生音訊、Native Speech Sync 驗證）在 V0 無對象可驗，屬 Phase 2。
 
-> 本 SPEC 完成後仍未進行功能程式修改；等待 PRD 與 SPEC 核准。
+> PRD-001 與本 SPEC 已於 2026-08-30 核准；V0 pipeline 依此實作，既有功能程式（task.py／llm.py／voice.py／subtitle.py／video.py）維持未修改。

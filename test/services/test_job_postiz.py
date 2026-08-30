@@ -21,10 +21,12 @@ import pytest
 from app.models.content_job import JobStatus, ProviderEvent
 from app.services.jobs.postiz import (
     PostizAPIError,
+    PostizConfigurationError,
     PostizDraftOnlyError,
     PostizError,
     PostizPublisher,
     PostizSettings,
+    settings_from_config,
 )
 from app.services.jobs.state_machine import ErrorClass, classify_error, transition
 from app.services.jobs.store import JobStore
@@ -847,3 +849,148 @@ class TestAForeignCredentialOnTheSuccessPath:
             for path in tmp_dir_files(store, job.content_job_id)
         )
         assert "someone-elses-placeholder" not in written
+
+
+# -- the [postiz] config section --------------------------------------------
+
+
+def config_section(**overrides):
+    payload = {
+        "base_url": "https://postiz.example.test/api",
+        "api_token": POSTIZ_TOKEN,
+        "platform": "linkedin",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestSettingsFromConfig:
+    """Reading ``[postiz]``: unset is normal, half-set is an error."""
+
+    @pytest.mark.parametrize(
+        "section",
+        (
+            {},
+            {"base_url": "", "api_token": "", "platform": ""},
+            # A timeout alone still names no endpoint and no credential.
+            {"request_timeout_seconds": 30},
+        ),
+    )
+    def test_an_unset_section_is_none_rather_than_an_error(self, section):
+        assert settings_from_config(section) is None
+
+    @pytest.mark.parametrize(
+        "section,field",
+        (
+            (config_section(base_url=""), "base_url"),
+            (config_section(base_url="http://postiz.example.test"), "base_url"),
+            (config_section(base_url="https://u:p@postiz.example.test"), "base_url"),
+            (config_section(api_token=""), "api_token"),
+            (config_section(api_token="short"), "api_token"),
+            (config_section(platform=""), "platform"),
+            (config_section(request_timeout_seconds="soon"), "request_timeout_seconds"),
+            (config_section(request_timeout_seconds=0), "request_timeout_seconds"),
+        ),
+    )
+    def test_a_malformed_field_is_named_without_its_value(self, section, field):
+        with pytest.raises(PostizConfigurationError) as raised:
+            settings_from_config(section)
+
+        message = str(raised.value)
+        assert field in message
+        assert POSTIZ_TOKEN not in message
+
+    def test_a_valid_section_produces_settings_validate_accepts(self):
+        result = settings_from_config(
+            config_section(request_timeout_seconds="12.5")
+        )
+
+        assert result is not None
+        result.validate()
+        assert result.base_url == "https://postiz.example.test/api"
+        assert result.platform == "linkedin"
+        # A TOML string survives as a number.
+        assert result.request_timeout_seconds == 12.5
+        # The token still never reaches a repr.
+        assert POSTIZ_TOKEN not in repr(result)
+
+    def test_the_real_config_object_is_the_default_source(self, monkeypatch):
+        from app.config import config
+
+        monkeypatch.setattr(config, "postiz", {}, raising=False)
+        assert settings_from_config() is None
+
+        monkeypatch.setattr(config, "postiz", config_section(), raising=False)
+        result = settings_from_config()
+
+        assert result is not None
+        assert result.api_token == POSTIZ_TOKEN
+
+
+class TestTheRunCommandBindsThePublisherToItsStore:
+    """PR #17's property, asserted at the only place that constructs one.
+
+    A publisher bound to another store — or to none — would POST and record
+    nothing, and the next run would create a second draft.
+    """
+
+    def test_a_configured_section_yields_a_publisher_bound_to_the_run_store(
+        self, tmp_path, monkeypatch
+    ):
+        import cli
+        from app.config import config
+        from app.services.jobs import runner as runner_module
+
+        monkeypatch.setattr(config, "postiz", config_section(), raising=False)
+        store = demo_store(tmp_path)
+        seen = {}
+
+        def fake_run_job(job_id, run_store, **kwargs):
+            seen["store"] = run_store
+            seen["publisher"] = kwargs.get("publisher")
+            raise runner_module.RunnerError("stop before doing any work")
+
+        monkeypatch.setattr(runner_module, "run_job", fake_run_job)
+        args = cli.parse_args(
+            ["run", "--job", "three-scene-demo", "--store", str(store.root)]
+        )
+
+        assert cli.run_job_command(args) == 1
+        assert isinstance(seen["publisher"], PostizPublisher)
+        assert seen["publisher"]._store is seen["store"]
+
+    def test_an_unset_section_passes_no_publisher(self, tmp_path, monkeypatch):
+        import cli
+        from app.config import config
+        from app.services.jobs import runner as runner_module
+
+        monkeypatch.setattr(config, "postiz", {}, raising=False)
+        store = demo_store(tmp_path)
+        seen = {}
+
+        def fake_run_job(job_id, run_store, **kwargs):
+            seen["publisher"] = kwargs.get("publisher")
+            raise runner_module.RunnerError("stop before doing any work")
+
+        monkeypatch.setattr(runner_module, "run_job", fake_run_job)
+        args = cli.parse_args(
+            ["run", "--job", "three-scene-demo", "--store", str(store.root)]
+        )
+
+        assert cli.run_job_command(args) == 1
+        assert seen["publisher"] is None
+
+    def test_a_misconfigured_section_is_exit_two(self, tmp_path, monkeypatch, capsys):
+        import cli
+        from app.config import config
+
+        monkeypatch.setattr(
+            config, "postiz", config_section(api_token="short"), raising=False
+        )
+        store = demo_store(tmp_path)
+        args = cli.parse_args(
+            ["run", "--job", "three-scene-demo", "--store", str(store.root)]
+        )
+
+        assert cli.run_job_command(args) == 2
+        assert capsys.readouterr().out == ""

@@ -35,9 +35,10 @@ What it deliberately does **not** do:
 * **It never invents a caption.** ``Script`` has no caption field; ``hook`` and
   ``cta`` are the two that exist, so :func:`postiz_caption` is exactly those two
   joined, and a caller who wants something else passes ``caption=``.
-* **It never reads a credential.** ``PostizSettings`` has no config keys and
-  this module adds none: the caller constructs the publisher, or the run stops
-  at ``POSTIZ_DRAFTING`` and says so.
+* **It never reads a credential.** ``PostizSettings`` is built from the
+  ``[postiz]`` config section by ``postiz.settings_from_config()``, and this
+  module never touches it: the caller constructs the publisher, or the run
+  stops at ``POSTIZ_DRAFTING`` and says so.
 * **It never auto-passes content QA**, and it never resumes ``BUDGET_EXCEEDED``:
   §5.2 gives that state no return row on purpose, so recovery is two hops with a
   human in between.
@@ -310,8 +311,8 @@ def _step(record: JobRecord, store: JobStore, options: _Options) -> Optional[str
         if options.publisher is None:
             return (
                 "the job is ready for a Postiz draft but no publisher was "
-                "supplied; PostizSettings has no config keys in V0, so the "
-                "caller constructs it"
+                "supplied; fill the [postiz] section in config.toml "
+                "(base_url / api_token / platform)"
             )
         # A publisher persists the draft only when a store was injected at
         # construction (postiz.PostizPublisher.__init__), and it is the caller
