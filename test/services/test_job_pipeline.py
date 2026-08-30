@@ -11,13 +11,17 @@ from app.models.content_job import JobStatus
 from app.services.jobs import pipeline
 from app.services.jobs.budget import check_budget as real_check_budget
 from app.services.jobs.state_machine import BudgetExceededError, IllegalTransitionError
+from app.models.content_job import Script
+from app.services.jobs.llm_adapter import MIN_NARRATION_CHARS
 from app.services.jobs.pipeline import (
     JobInputError,
+    MIN_TARGET_DURATION_SEC,
     ScriptGenerationError,
     create_job,
     generate_script,
     start_scripting,
 )
+from app.services.jobs.scene_planner import _segment
 from app.services.jobs.store import JobStore
 
 FIXTURES_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "jobs"
@@ -714,3 +718,151 @@ def test_generate_script_gates_and_audits_every_llm_call(tmp_path, responses):
     assert record.job.actual_cost_usd == pytest.approx(
         expected_calls * record.usage_ledger[0].estimated_cost_usd
     )
+
+
+def _completion(content: str) -> ChatCompletion:
+    return ChatCompletion.model_validate(
+        {
+            "id": "completion-duration",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {"content": content, "role": "assistant"},
+                }
+            ],
+            "created": 0,
+            "model": "deepseek-v4-pro",
+            "object": "chat.completion",
+        }
+    )
+
+
+def _prompts_sent(tmp_path, *responses, **request_overrides):
+    """Drive generate_script at the provider-client boundary, return prompts."""
+    store = JobStore(tmp_path)
+    job = start_scripting(create_job(valid_request(**request_overrides), store), store)
+    fake_client = Mock()
+    fake_client.chat.completions.create.side_effect = [
+        _completion(response) for response in responses
+    ]
+    with (
+        patch.dict(pipeline.config.app, {"deepseek_api_key": "demo-value"}, clear=False),
+        patch("app.services.llm.OpenAI", return_value=fake_client),
+    ):
+        script = generate_script(job, store)
+    prompts = [
+        call.kwargs["messages"][-1]["content"]
+        for call in fake_client.chat.completions.create.call_args_list
+    ]
+    return script, prompts
+
+
+def _valid_script_json() -> str:
+    return (FIXTURES_ROOT / "three-scene-demo/scripts/script.json").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_script_prompt_budgets_chinese_narration_by_target_duration(tmp_path):
+    _, prompts = _prompts_sent(
+        tmp_path, _valid_script_json(), target_duration_sec=50, language="zh-TW"
+    )
+
+    assert "50 seconds" in prompts[0]
+    assert "240 characters" in prompts[0]
+
+
+def test_script_prompt_states_seconds_without_character_budget_for_english(tmp_path):
+    _, prompts = _prompts_sent(
+        tmp_path, _valid_script_json(), target_duration_sec=50, language="en-US"
+    )
+
+    assert "50 seconds" in prompts[0]
+    assert "characters" not in prompts[0]
+
+
+def test_script_prompt_character_budget_scales_with_target_duration(tmp_path):
+    _, short_prompts = _prompts_sent(
+        tmp_path / "short", _valid_script_json(), target_duration_sec=30
+    )
+    _, long_prompts = _prompts_sent(
+        tmp_path / "long", _valid_script_json(), target_duration_sec=90
+    )
+
+    assert "144 characters" in short_prompts[0]
+    assert "432 characters" in long_prompts[0]
+
+
+def test_script_prompt_constrains_only_the_spoken_fields(tmp_path):
+    _, prompts = _prompts_sent(tmp_path, _valid_script_json())
+    constraint = prompts[0].split("Return exactly one JSON object")[0]
+
+    assert "hook, body, conclusion and cta are read aloud" in constraint
+    for unspoken in ("title", "core_message", "claims", "sources", "risk_flags"):
+        assert unspoken in constraint  # named as explicitly NOT to be padded
+    assert "Do not pad" in constraint
+
+
+def test_script_prompt_states_the_narration_floor(tmp_path):
+    """A budget alone lets a compliant model undershoot into a script that
+    cannot be planned. Measured 2026-08-30: 72 narration characters plan into 8
+    scenes, 66 raise ScenePlanError, and SCENE_PLANNING is not a §5.2 return
+    target — so the job would park unrecoverably."""
+    _, prompts = _prompts_sent(
+        tmp_path, _valid_script_json(), target_duration_sec=20, language="zh-TW"
+    )
+
+    assert f"never fewer than {MIN_NARRATION_CHARS} characters" in prompts[0]
+    assert "eight scenes" in prompts[0]
+
+
+def test_a_target_shorter_than_eight_scenes_can_carry_is_refused(tmp_path):
+    """Always impossible; only reachable now that the duration shapes the
+    script. Refusing at input beats parking at SCENE_PLANNING."""
+    store = JobStore(str(tmp_path))
+    request = valid_request(target_duration_sec=MIN_TARGET_DURATION_SEC - 1)
+
+    with pytest.raises(JobInputError, match="at least"):
+        create_job(request, store)
+
+    assert not list(tmp_path.iterdir())
+
+
+def test_the_shortest_accepted_target_still_plans_into_eight_scenes(tmp_path):
+    """The floor is not decoration: a script written to exactly the budget the
+    shortest legal job advertises must survive scene planning."""
+    narration = "遠端溝通最常見的失誤是把同步當預設。" * 4
+    script = Script(
+        title="t", target_audience="a", core_message="c",
+        hook="第一個問題是什麼？", body=[narration], conclusion="先寫下來再開會。",
+        cta="今天就挑一個會議取消掉。", claims=[], sources=[], risk_flags=[],
+    )
+    spoken = len(script.hook) + sum(len(p) for p in script.body) + len(
+        script.conclusion
+    ) + len(script.cta)
+
+    assert spoken >= MIN_NARRATION_CHARS
+    assert len(_segment(script)) >= 8
+
+
+def test_repair_requirements_still_follow_the_duration_constraint(tmp_path):
+    _, prompts = _prompts_sent(tmp_path, "{}", _valid_script_json())
+
+    assert len(prompts) == 2
+    assert "Repair requirements:" in prompts[1]
+    assert prompts[1].index("50 seconds") < prompts[1].index("Repair requirements:")
+    assert "Repair requirements:" not in prompts[0]
+
+
+def test_script_prompt_keeps_json_shape_instructions_and_returns_provider_text(
+    tmp_path,
+):
+    expected = json.loads(_valid_script_json())
+
+    script, prompts = _prompts_sent(tmp_path, _valid_script_json())
+
+    assert script.model_dump(mode="json") == expected
+    assert "Return exactly one JSON object and no markdown" in prompts[0]
+    for field in expected:
+        assert f"- {field}:" in prompts[0]
