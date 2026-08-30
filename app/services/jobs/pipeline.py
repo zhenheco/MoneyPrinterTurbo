@@ -41,6 +41,14 @@ _ALLOWED_IMAGE_MODES = frozenset({"assisted_qwen"})
 _ALLOWED_VIDEO_MODES = frozenset({"manual_google_flow"})
 _ALLOWED_PUBLISH_MODES = frozenset({"postiz_draft"})
 
+#: The shortest job SPEC-001 §4.4 can actually produce. Its 8-scene floor needs
+#: :data:`~app.services.jobs.llm_adapter.MIN_NARRATION_CHARS` characters of
+#: narration, which at the measured 4.8 zh characters per second is 20 seconds.
+#: This was always true; it only became reachable once the duration started
+#: constraining the script, and failing here beats failing at SCENE_PLANNING,
+#: which §5.2 gives no return row.
+MIN_TARGET_DURATION_SEC = round(llm_adapter.MIN_NARRATION_CHARS / 4.8)
+
 # Conservative ceiling for one structured-script call: one-to-two orders of
 # magnitude above the measured call cost, leaving about 60 equivalent calls in
 # the default $3 budget. Replace it with provider/model pricing plus measured
@@ -72,6 +80,12 @@ def _validate_request(request: Mapping[str, Any]) -> None:
         or request["target_duration_sec"] <= 0
     ):
         raise JobInputError("target_duration_sec must be a positive integer")
+    if request["target_duration_sec"] < MIN_TARGET_DURATION_SEC:
+        raise JobInputError(
+            f"target_duration_sec must be at least {MIN_TARGET_DURATION_SEC} "
+            "seconds: SPEC-001 §4.4 requires 8 scenes and a shorter narration "
+            "cannot be split into that many"
+        )
     if (
         isinstance(request["max_generated_video_scenes"], bool)
         or not isinstance(request["max_generated_video_scenes"], int)
@@ -236,6 +250,7 @@ def generate_script(job: ContentJob, store: JobStore) -> Script:
             response = llm_adapter.generate_script(
                 topic=current_job.topic,
                 language=current_job.language,
+                target_duration_sec=current_job.target_duration_sec,
                 repair_prompt=repair_prompt,
                 app_config=runtime_app_config,
             )

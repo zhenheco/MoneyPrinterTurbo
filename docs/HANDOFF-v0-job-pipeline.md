@@ -1,6 +1,6 @@
 # Handoff：V0 Job Pipeline
 
-> 最後更新 2026-08-30（issue #11 收尾 + Postiz config 收口 / Phase 0 核准）。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
+> 最後更新 2026-08-30（issue #11 收尾 + Postiz config 收口 / Phase 0 核准 + 腳本長度約束）。接手前先跑「驗證現況」那一節，不要相信這份文件的任何斷言 —— 它可能已經過時。
 
 ## 1. 現在在哪
 
@@ -20,7 +20,8 @@ V0 job pipeline 的相關合併：
 | #14 | — | issue #8：Asset Import + Creator Profile preflight（見 §4.2） |
 | #15 | `41beee3` | issue #9：Render Manifest + Renderer + technical QA（見 §4.3） |
 | #16 | — | issue #11：`run --job` 端到端 orchestrator + 兩份 golden fixture + technical QA report（見 §4.4） |
-| 本次 | — | `[postiz]` config 區段 + `settings_from_config()` + CLI 接線；Phase 0 核准閘門關閉（見 §4.5） |
+| 前次 | — | `[postiz]` config 區段 + `settings_from_config()` + CLI 接線；Phase 0 核准閘門關閉（見 §4.5） |
+| 本次 | — | script prompt 帶入 `target_duration_sec`（見 §4.6，實跑量測顯示它先前對腳本零影響） |
 
 PLAN-001 的 11 張 issue **全部完成**：#1 #2 #3 #4 #5 #6 #7 #8 #9 #10 #11。
 
@@ -36,7 +37,7 @@ Phase 0 核准閘門已於 2026-08-30 關閉：PRD-001 / SPEC-001 標記 `Approv
 | `app/services/jobs/budget.py` | §10 預算閘門 + 成本帳本 |
 | `app/services/jobs/postiz.py` | §6.4 draft-only 發布器 |
 | `app/services/jobs/pipeline.py` | issue #4：`create_job` / `start_scripting` / `generate_script` |
-| `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**） |
+| `app/services/jobs/llm_adapter.py` | issue #4 修復：繞過上游 `llm.generate_script` 的 JSON 破壞（**必讀 §3**）＋ prompt 的長度約束（見 §4.6） |
 | `app/services/jobs/scene_planner.py` | issue #5：`start_scene_planning` / `plan_scenes` + §6.1 generation manifest |
 | `app/services/jobs/master_voice.py` | issue #6：`start_voice_generating` / `generate_master_voice` + 時間軸文件 |
 | `app/services/jobs/voice_adapter.py` | issue #6：隔離 `voice.tts` 的 None-on-failure 與兩種時間軸單位（**必讀 §3.1**） |
@@ -407,7 +408,7 @@ FR-008 的內容 QA 那一半（繁中／Hook／核心觀點／結論／CTA／�
 - caption **不會被憑空發明**：規則是 `script.hook` + 空行 + `script.cta`（`Script` 沒有 caption 欄位，這兩個是實際存在的），呼叫端可用 `caption=` 覆寫。
 - runner **不讀任何憑證**：publisher 由呼叫端建構，沒給就停在 `POSTIZ_DRAFTING` 並說明原因（訊息現在指向 `config.toml` 的 `[postiz]` 區段）。憑證是 `postiz.settings_from_config()` 讀的，不是 runner。
 
-### 4.5 Postiz config 收口（本次）
+### 4.5 Postiz config 收口（前次）
 
 在此之前 `cli.py run --job` 永遠到不了草稿：`PostizSettings` 沒有任何 config key，只有 Python 呼叫端能建 publisher。現在：
 
@@ -493,6 +494,45 @@ SPEC §9 的最後一列。`parser.add_subparsers(dest="command")`**不帶** `re
 - **`scene_planner.MIN_SCENES` 是 8**，所以整合測試的假腳本至少要能切出 8 段 ≥6 字的單位（hook + 5 段 body + conclusion + cta）。這直接決定旁白長度，也就決定 CI 的 wall clock。
 - **一個字的 Edge TTS 探測會被 `voice_adapter` 正當地拒絕**：「測試」回來是 775 ms 時間軸配 1780 ms 音訊，超出容差。網路 gate 的探測句必須是完整句子，否則有能力跑的主機會被整檔 skip。
 - **`assets.jsonl` 沒有去重**，讀 AssetRecord 一律取最後一筆（既有的坑，runner 沒有繞過它，是 `renderer` 自己處理）。
+
+## 4.6 腳本長度受 `target_duration_sec` 約束（本次）
+
+**在這之前 `target_duration_sec` 對腳本完全沒有影響。** 2026-08-30 跑了三支真的 V0 影片量出來：
+
+| target | 旁白字數 | 實際語音長度 | 倍率 |
+|---|---|---|---|
+| 50s | 767 | 156.5s | 3.1x |
+| 40s | 786 | 162.0s | 4.0x |
+| 60s | 684 | 151.7s | 2.5x |
+
+40s 那支產出**最長**的腳本，target 與字數的差積和是 **-1020**（負的；母體共變異數 -340）；40–60s 的區間裡字數只差 14%。這不是「約束太鬆」，是根本沒有約束。
+
+根因是 `llm_adapter._build_prompt`：它給 topic、language 與欄位清單，**沒有任何長度條件** —— 沒有秒數、沒有字數、沒有句數。`pipeline.py` 呼叫 `generate_script(topic=, language=, repair_prompt=, app_config=)` 時把 `current_job.target_duration_sec` 留在原地沒傳。它唯一到得了的地方是 `scene_planner._durations`，那裡把它切給各 scene —— 所以 **scene 槽位宣稱一個長度，音檔是另一個長度**。
+
+修法：`generate_script` 多一個 keyword-only 的 `target_duration_sec`，`pipeline` 傳 `current_job.target_duration_sec`，prompt 多一段長度約束。約束本身有三個決定：
+
+- **只點名 hook / body / conclusion / cta。** `scene_planner.py:194-196` 的 segments 就是這四種，`master_voice.narration_text` 串的也是它們；`title` / `target_audience` / `core_message` / `claims` / `sources` / `risk_flags` **從來不會被唸出來**。prompt 明講「不要拿這些去補長度」，免得模型把字數搬過去。
+- **秒數永遠給，字數只給中文。** 4.8 字/秒是三支影片實測的（4.9 / 4.9 / 4.5，Edge TTS zh-TW），所以 50 秒 ≈ 240 字。**其他語言沒有量過**，寧可只給秒數也不要編一個每語言的速率 —— 語言判定就是 `language.casefold().startswith("zh")`（實際傳進來的是 `zh-TW`）。
+- **不加強制、不加長度重試。** repair loop 是給 schema 失敗用的；把一份 schema 合法的腳本因為太長而退回，等於每次生成都多花一次付費呼叫，而且可能迴圈。prompt 約束就是全部的改動，夠不夠是下一次真跑的問題。這個決定寫在 `llm_adapter` 的 module docstring 裡，免得下一個讀的人以為是漏掉的。
+
+**縮短腳本不會打破 8–10 場景，但有一個下限**（先量過才動手）：`_segment` 要湊滿 8 段，而它只在切完兩半都 ≥ `_MIN_UNIT_CHARS`（6）時才切，所以**旁白總字數的硬下限是 8 × 12 = 72 字**；實測 72 字排得出 8 段、66 字丟 `ScenePlanError`。`MIN_SCENES` / `MAX_SCENES` / `_MIN_UNIT_CHARS` 一個都沒動。
+
+這個下限先前碰不到（模型不管你要幾秒都寫 750 字左右），**是這次修法讓它變成可達的失效模式**：規劃失敗會 park 到 `MANUAL_ACTION_REQUIRED`，而 §5.2 不給 `SCENE_PLANNING` 返回列，那種 job 只能取消 —— 比影片太長糟得多。所以兩端都補：
+
+- prompt 除了預算還寫死下限（`llm_adapter.MIN_NARRATION_CHARS = 8 × 12 = 96`，比硬下限 72 多留餘裕），明講「更短的腳本切不出這條 pipeline 需要的八個場景」。
+- `create_job` 拒絕 `target_duration_sec < 20`（`pipeline.MIN_TARGET_DURATION_SEC`，由 96 字 ÷ 4.8 字/秒 得出）。**這不是產品偏好，是 §4.4 早就隱含的算術**：低於 20 秒的 job 在任何字數下都湊不出 8 段。它一直是不可能的，只是先前失敗得晚。20 秒正好是 `missing-asset` fixture 與 `test_job_runner` 已經在用的值，所以沒有既有東西被擋掉。
+
+**修法後重跑同三支（真 DeepSeek，2026-08-30）：**
+
+| target | 旁白字數 | 實際語音長度 | 倍率 | 場景數 |
+|---|---|---|---|---|
+| 50s | 233 | 53.7s | **1.1x** | 9 |
+| 40s | 189 | 47.5s | **1.2x** | 10 |
+| 60s | 242 | 54.4s | **0.9x** | 8 |
+
+倍率從 2.5–4.0x 降到 0.9–1.2x，而且 target 現在**真的有作用**（40→189、50→233、60→242，單調遞增）。場景數全在 8–10 內，沒有規劃失敗。每個場景從 11–24 秒降到 4.8–6.8 秒 —— 直式短影音該有的節奏。**光靠 prompt 就夠了，沒有加強制執行。**
+
+測試加在 `test/services/test_job_pipeline.py`，邊界一律是 `patch("app.services.llm.OpenAI")`（跟既有測試同一層，再往上就是在測自己的 mock），從 `chat.completions.create` 的 call args 讀真正送出去的 prompt。
 
 ## 5. §5.2 補邊：停駐的 job 現在回得來
 
