@@ -35,9 +35,23 @@ _NON_RETRYABLE_ERROR_MARKERS = (
 
 
 # 4.8 characters per second is measured from real Edge TTS zh-TW narration
-# (4.9 / 4.9 / 4.5 across three trial videos). No other language was measured,
-# so non-Chinese jobs get the seconds and no per-language character rate — an
-# invented number would be worse than none.
+# (4.9 / 4.85 / 4.51 across three full 150-second trial videos). No other
+# language was measured, so non-Chinese jobs get the seconds and no
+# per-language character rate — an invented number would be worse than none.
+#
+# Those trials ran on zh-TW-HsiaoChenNeural-Female at rate 1.0 and
+# ``master_voice`` now ships zh-TW-YunJheNeural-Male at 0.9, so it was
+# re-measured 2026-08-31 on a 194-character narration through real Edge TTS,
+# all four combinations:
+#
+#     HsiaoChen 1.0  43.24s  4.49 chars/sec     YunJhe 1.0  39.17s  4.95
+#     HsiaoChen 0.9  48.04s  4.04               YunJhe 0.9  43.52s  4.46
+#
+# YunJhe is naturally about 10% faster than HsiaoChen, and 0.9 gives almost
+# exactly that back: the shipped pair runs within 0.7% of the baseline this
+# constant was measured on, so 4.8 still holds. Change the voice or the rate
+# and re-measure on a full-length narration — the same pair measured ~96% on a
+# short clip, which was leading-and-trailing silence, not signal.
 _ZH_CHARS_PER_SECOND = 4.8
 
 #: The narration floor SPEC-001 §4.4 implies. Scene planning must produce 8
