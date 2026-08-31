@@ -32,6 +32,7 @@ from app.services.jobs.master_voice import (
     generate_master_voice,
     narration_text,
     resolve_voice_name,
+    resolve_voice_rate,
     start_voice_generating,
 )
 from app.services.jobs.state_machine import BudgetExceededError
@@ -109,9 +110,11 @@ class FakeCommunicate:
     constructed = 0
     audio = None
     boundaries = None
+    last_rate = None
 
     def __init__(self, text, voice, rate="+0%"):
         type(self).constructed += 1
+        type(self).last_rate = rate
         self.text = text
         self.voice = voice
         self.rate = rate
@@ -134,6 +137,7 @@ def edge(audio=None, boundaries=None, seconds: float = 3.0):
             {"offset": half, "duration": half, "text": "second"},
         ]
     FakeCommunicate.constructed = 0
+    FakeCommunicate.last_rate = None
     FakeCommunicate.audio = audio
     FakeCommunicate.boundaries = boundaries
     return patch.multiple(
@@ -785,6 +789,85 @@ def test_a_configured_voice_wins_over_the_language_default(tmp_path):
         assert resolve_voice_name(store.load(job.content_job_id).job) == (
             "en-GB-SoniaNeural-Female"
         )
+
+
+def test_the_zh_tw_default_is_the_audited_male_voice_at_nine_tenths(tmp_path):
+    """A human auditioned five Edge TTS samples and picked this pair. Pin both
+    halves: the voice alone does not reproduce what was approved."""
+    store, job = seeded(tmp_path)
+    localised = store.load(job.content_job_id).job.model_copy(
+        update={"language": "zh-TW"}
+    )
+
+    with patch.dict(master_voice.config.app, {}, clear=False):
+        master_voice.config.app.pop("voice_name", None)
+        master_voice.config.app.pop("voice_rate", None)
+        assert resolve_voice_name(localised) == "zh-TW-YunJheNeural-Male"
+        assert resolve_voice_rate(localised) == 0.9
+
+
+def test_a_configured_rate_wins_over_the_language_default(tmp_path):
+    store, job = seeded(tmp_path)
+    localised = store.load(job.content_job_id).job.model_copy(
+        update={"language": "zh-TW"}
+    )
+
+    # TOML hands a rate over as whatever the operator typed, so a string counts.
+    with patch.dict(master_voice.config.app, {"voice_rate": "1.25"}):
+        assert resolve_voice_rate(localised) == 1.25
+
+
+def test_an_unaudited_language_keeps_the_untuned_rate(tmp_path):
+    store, job = seeded(tmp_path)
+    localised = store.load(job.content_job_id).job.model_copy(
+        update={"language": "en-US"}
+    )
+
+    with patch.dict(master_voice.config.app, {}, clear=False):
+        master_voice.config.app.pop("voice_rate", None)
+        assert resolve_voice_rate(localised) == 1.0
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ["fast", 0, -0.5, "0", float("nan"), float("inf"), "nan", "inf"],
+)
+def test_a_malformed_rate_is_refused_and_never_reaches_the_provider(
+    tmp_path, configured
+):
+    """voice.convert_rate_to_percent would quietly rewrite these to 1.0, which
+    is a pace nobody chose. The gate refuses before any provider call.
+
+    ``nan`` and ``inf`` are here because both are legal TOML float
+    literals that a bare ``rate <= 0`` lets through: measured 2026-08-31,
+    each reached Edge TTS, raised inside the provider, and burned all
+    three attempts while reporting itself as a retryable provider fault."""
+    store, job = seeded(tmp_path)
+    voicing = start_voice_generating(job, store)
+
+    with patch.dict(master_voice.config.app, {"voice_rate": configured}):
+        with edge():
+            with pytest.raises(MasterVoiceError, match="voice_rate"):
+                generate_master_voice(voicing, store)
+
+    assert FakeCommunicate.constructed == 0
+    assert not audio_assets(store, job.content_job_id)
+
+
+def test_the_resolved_rate_reaches_the_provider(tmp_path):
+    """The resolver being right proves nothing if nobody passes it on. Read the
+    rate off the edge_tts call itself: -10% is what 0.9 means to the provider."""
+    store, job = seeded(tmp_path)
+    zh_tw = store.load(job.content_job_id).job.model_copy(update={"language": "zh-TW"})
+    store.save(zh_tw)
+    voicing = start_voice_generating(store.load(job.content_job_id).job, store)
+
+    with patch.dict(master_voice.config.app, {}, clear=False):
+        master_voice.config.app.pop("voice_rate", None)
+        with edge():
+            generate_master_voice(voicing, store)
+
+    assert FakeCommunicate.last_rate == "-10%"
 
 
 @pytest.mark.parametrize(

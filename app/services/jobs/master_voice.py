@@ -28,6 +28,7 @@ or spend past the limit.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from typing import Any, Dict, List, Sequence
 from uuid import uuid4
@@ -72,11 +73,23 @@ DEFAULT_VOICE_NAME = "zh-CN-XiaoxiaoNeural-Female"
 #: by a mainland voice. Only the languages the V0 fixtures actually use are
 #: listed; anything else falls back to ``DEFAULT_VOICE_NAME``.
 _LANGUAGE_VOICES = {
-    "zh-tw": "zh-TW-HsiaoChenNeural-Female",
+    "zh-tw": "zh-TW-YunJheNeural-Male",
     "zh-hk": "zh-HK-HiuMaanNeural-Female",
     "zh": DEFAULT_VOICE_NAME,
     "en": "en-US-JennyNeural-Female",
     "ja": "ja-JP-NanamiNeural-Female",
+}
+
+#: The rate every language is read at unless one is tuned below.
+DEFAULT_VOICE_RATE = 1.0
+
+#: Language prefix -> speaking rate multiplier. Only ``zh-tw`` is tuned: a
+#: human auditioned five Edge TTS samples of the same script and picked
+#: ``zh-TW-YunJheNeural-Male`` at 0.9. Every other language stays at
+#: ``DEFAULT_VOICE_RATE`` because none was auditioned, and a guessed rate is an
+#: unmeasured claim wearing a default's clothes.
+_LANGUAGE_VOICE_RATES = {
+    "zh-tw": 0.9,
 }
 
 _ESTIMATED_COST_SOURCE = (
@@ -123,6 +136,43 @@ def resolve_voice_name(job: ContentJob) -> str:
         if candidate in _LANGUAGE_VOICES:
             return _LANGUAGE_VOICES[candidate]
     return DEFAULT_VOICE_NAME
+
+
+def resolve_voice_rate(job: ContentJob) -> float:
+    """The configured speaking rate, else one matching the job's language.
+
+    ``config.app["voice_rate"]`` wins when it is set; TOML hands it back as
+    whatever the operator typed, so it is coerced here. A value that is not a
+    positive number is **refused** with :class:`MasterVoiceError` rather than
+    quietly corrected: ``voice.convert_rate_to_percent`` would turn it into 1.0
+    without telling anyone, and a narration read at a pace nobody chose is
+    worse than one that stops and says why. The refusal happens before the
+    budget gate, so a malformed config spends nothing, never reaches the
+    provider, and the job stays where it was and can retry once the config is
+    fixed.
+    """
+    configured = config.app.get("voice_rate", None)
+    if configured is not None and str(configured).strip() != "":
+        try:
+            rate = float(configured)
+        except (TypeError, ValueError):
+            rate = 0.0
+        # ``isfinite`` first: ``nan <= 0`` is False and ``inf`` is positive, and
+        # both are legal TOML float literals. Measured 2026-08-31 — either slips
+        # past a bare ``rate <= 0``, reaches Edge TTS, raises inside the provider
+        # and burns all three attempts, reporting itself as a retryable provider
+        # fault rather than the config typo it is.
+        if not math.isfinite(rate) or rate <= 0:
+            raise MasterVoiceError(
+                f"voice_rate must be a positive, finite number, got {configured!r}",
+                retryable=False,
+            )
+        return rate
+    language = str(job.language or "").strip().lower()
+    for candidate in (language, language.split("-")[0]):
+        if candidate in _LANGUAGE_VOICE_RATES:
+            return _LANGUAGE_VOICE_RATES[candidate]
+    return DEFAULT_VOICE_RATE
 
 
 def _voice_generation_attempts(record) -> set:
@@ -291,6 +341,10 @@ def _audit(
         actual_cost_usd=0.0 if free else "unknown",
         request_summary=summarize(
             "master voice request",
+            # The speaking rate is deliberately absent: ``summarize`` keeps no
+            # value, only a field count, so recording it here would record
+            # nothing while looking like it did. ProviderEvent has no rate
+            # field, and the rate is reproducible from config plus language.
             {"voice": model, "characters": len(narration)},
         ),
         response_summary=summarize(
@@ -383,6 +437,7 @@ def generate_master_voice(job: ContentJob, store: JobStore) -> AssetRecord:
         raise error
 
     voice_name = resolve_voice_name(record.job)
+    voice_rate = resolve_voice_rate(record.job)
     provider_id, model = voice_adapter.resolve_identity(voice_name)
     estimated = (
         0.0 if voice_adapter.is_free(provider_id) else VOICE_TTS_CALL_COST_CEILING_USD
@@ -398,6 +453,7 @@ def generate_master_voice(job: ContentJob, store: JobStore) -> AssetRecord:
             text=narration,
             voice_name=voice_name,
             voice_file=str(audio_path),
+            voice_rate=voice_rate,
         )
     except voice_adapter.VoiceTransportError as error:
         failure = MasterVoiceError(str(error), retryable=error.retryable)

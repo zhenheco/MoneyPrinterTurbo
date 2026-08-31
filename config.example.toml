@@ -38,6 +38,19 @@ loomloom_video_run_timeout_seconds = 1800
 # 单次 Edge TTS 流式请求超时时间。慢网络可适当调大，设置为 0 表示禁用超时。
 edge_tts_timeout = 30
 
+# Master Voice for the job pipeline. Leave both empty to take the default for
+# the job's language. Edge TTS offers exactly three Taiwanese voices:
+# "zh-TW-YunJheNeural-Male", "zh-TW-HsiaoChenNeural-Female" and
+# "zh-TW-HsiaoYuNeural-Female". A zh-TW job defaults to the first of those at
+# voice_rate 0.9, picked by ear; every other language defaults to rate 1.0.
+# voice_rate is a speed multiplier and must be a positive number — a
+# non-numeric or non-positive value is refused before the provider is called,
+# not silently corrected.
+# 旁白语音与语速。留空即使用该任务语言的默认值（zh-TW 为
+# zh-TW-YunJheNeural-Male、语速 0.9）；voice_rate 必须为正数。
+voice_name = ""
+voice_rate = ""
+
 # Verify TLS certificates for external APIs and material downloads.
 # 默认应保持开启；仅在可信代理或自签名证书环境中临时关闭。
 tls_verify = true

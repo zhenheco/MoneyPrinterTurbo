@@ -534,6 +534,30 @@ SPEC §9 的最後一列。`parser.add_subparsers(dest="command")`**不帶** `re
 
 測試加在 `test/services/test_job_pipeline.py`，邊界一律是 `patch("app.services.llm.OpenAI")`（跟既有測試同一層，再往上就是在測自己的 mock），從 `chat.completions.create` 的 call args 讀真正送出去的 prompt。
 
+## 4.7 Master Voice 換成台灣男聲，語速可設（本次）
+
+**起因是人耳，不是量測。** 使用者看完一支真的 V0 成片，說旁白不好聽，要更自然的中文、最好有台灣腔。先前 `_LANGUAGE_VOICES["zh-tw"]` 是 `zh-TW-HsiaoChenNeural-Female`，那是「不要用大陸腔」時隨手挑的第一個 zh-TW 語音，**沒有人聽過就上線了**。
+
+**可選的範圍是封閉的，先確認過才挑：** `voice.get_all_azure_voices()` 實際列舉，Edge TTS 的 zh-TW 語音**只有三個** —— `zh-TW-HsiaoChenNeural-Female`、`zh-TW-HsiaoYuNeural-Female`、`zh-TW-YunJheNeural-Male`。其他 TTS provider 在這個環境**一個都沒有憑證**：`azure`（v2）、`siliconflow`、`minimax_tts`、`elevenlabs`、`chatterbox` 都有 config 區塊但 api key 全空。所以 Edge TTS 是唯一能跑的，也沒有第四個聲音可以試。
+
+同一段腳本渲了五個樣本給人聽，選中的是 **#5：`zh-TW-YunJheNeural-Male`，`voice_rate` 0.9**。這是人耳的判斷，不是量測結果，也不需要是 —— 但它是**唯一被試聽過**的組合，所以 `zh-hk` / `zh` / `en` / `ja` 一個都沒動。
+
+改了兩處，一處是聲音，一處是先前**根本到不了**的旋鈕：
+
+- `master_voice._LANGUAGE_VOICES["zh-tw"]` → `zh-TW-YunJheNeural-Male`。
+- 新增 `master_voice.resolve_voice_rate(job)`，形狀完全比照 `resolve_voice_name`：`config.app["voice_rate"]` 優先，其次 `_LANGUAGE_VOICE_RATES` 的每語言預設，最後 `DEFAULT_VOICE_RATE = 1.0`。**只有 `zh-tw` 有調過的值（0.9）**，其他語言留在 1.0 —— 沒試聽過就編一個語速，跟編一個每語言字速一樣是無憑據的宣稱。
+  先前 `master_voice.py:397` 呼叫 `voice_adapter.synthesize(text=, voice_name=, voice_file=)` **沒有傳 `voice_rate`**，永遠吃 adapter 的預設 1.0；`voice_rate` 這條路是斷的，不是設定漏填。
+
+**壞值的處理是「拒絕」，不是「修正」（寫在 docstring 裡）：** TOML 的值可能是字串或根本不是數字，而 `voice.convert_rate_to_percent` 對非數字與 ≤0 一律**默默改成 1.0**。默默改成 1.0 等於用一個沒人選過的語速唸完整支片。所以 `resolve_voice_rate` 對非正數／不可轉換的值丟 `MasterVoiceError(retryable=False)`，而且**丟在 `check_budget` 之前** —— 設定打錯不花錢、不碰 provider，job 留在 `VOICE_GENERATING`，改完設定就能續跑。
+
+**語速刻意沒有寫進 audit trail。** `ProviderEvent.request_summary` 走的是 `budget.summarize`，它**只留欄位數與字元數，任何值都不留**（`"master voice request: 2 fields, N chars withheld"`）；把 rate 塞進 payload 只會讓 2 變 3，看起來有記錄其實什麼都沒記。`ProviderEvent` 也沒有 rate 欄位，而契約不在這條 slice 的範圍內。語速由 config + language 完全可重現，所以這裡留了一行註解說明為什麼是空的，免得下一個人以為是漏掉。
+
+**設定檔補了兩個 key（`config.example.toml` `[app]`）：** `voice_name` **先前就被 `resolve_voice_name` 讀，卻從來沒有被記載過**；`voice_rate` 是這次新增的。兩個都預設空字串＝用該語言的預設值，註解裡列出三個 zh-TW 語音。（`[ui]` 段落裡那個註解掉的 `voice_name` 是 WebUI 自己的偏好，不是這條路徑讀的。）
+
+**`llm_adapter._ZH_CHARS_PER_SECOND` 已重測，值不用動。** 4.8 字/秒原本是 §4.6 那三支 150 秒實測的平均（4.9 / 4.85 / 4.51），但那三支跑的是 **HsiaoChen、語速 1.0**，跟現在出貨的 **YunJhe、0.9** 不是同一個發音者。2026-08-31 用 194 字的完整旁白把四種組合都跑過真 Edge TTS：HsiaoChen 1.0 → 4.49、HsiaoChen 0.9 → 4.04、YunJhe 1.0 → 4.95、YunJhe 0.9 → 4.46 字/秒。**YunJhe 天生就比 HsiaoChen 快約 10%，0.9 倍速正好還回去** —— 出貨組合跟 4.8 的量測基準只差 **0.7%**，兩者對估時長來說可以互換，所以 4.8 繼續成立。（先前用 87 字短樣本量到「新組合約是舊的 96%」是雜訊：同一支短樣本量 HsiaoChen 1.0 得到 4.35，跟三支長片的 4.8 就差 9%，前後靜音在短片段裡佔比太高。）**換語音或換語速就要重測，而且要用完整長度的旁白量。**
+
+測試加在 `test/services/test_job_master_voice.py`，邊界維持全檔既有的 `edge_tts.Communicate` / `SubMaker`，沒有往上抬。最關鍵的一條是 `test_the_resolved_rate_reaches_the_provider`：**從 `FakeCommunicate` 收到的 `rate` 讀出 `-10%`**，而不是只斷言 resolver 自己回 0.9 —— 斷了 `synthesize` 的傳遞就會紅（實測，把 `voice_rate=` 拿掉後這條唯一地失敗）。
+
 ## 5. §5.2 補邊：停駐的 job 現在回得來
 
 **這一節先前記的缺口已經補上。** §5.2 從 65 條邊補到 **76 條**，補的全是「停下來的 job 怎麼回到流程」，沒有新的生成路徑：
